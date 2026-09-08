@@ -52,6 +52,7 @@ from app.api_client import (
     DEFAULT_BACKEND_URL
 )
 from app.mock_data import calculate_scenario
+from app.chat_engine import chat as chat_engine
 
 
 # ==========================================
@@ -66,6 +67,10 @@ st.set_page_config(
 
 # Initialize Session State
 init_session_state()
+
+# Initialize chat history
+if "chat_history" not in st.session_state:
+    st.session_state["chat_history"] = []
 
 # Inject Ultra-Modern Glassmorphic CSS
 st.markdown("""
@@ -268,6 +273,48 @@ st.markdown("""
         padding: 0.45rem 0.75rem;
         font-family: 'JetBrains Mono', monospace;
         font-size: 0.75rem;
+    }
+
+    /* Chat UI Styles */
+    .chat-container {
+        background: rgba(11, 15, 25, 0.95);
+        border: 1px solid rgba(56, 189, 248, 0.2);
+        border-radius: 12px;
+        padding: 1rem;
+        margin-top: 1.5rem;
+    }
+    .chat-msg-user {
+        background: rgba(37, 99, 235, 0.15);
+        border: 1px solid rgba(59, 130, 246, 0.3);
+        border-radius: 12px 12px 4px 12px;
+        padding: 0.75rem 1rem;
+        margin: 0.5rem 0;
+        margin-left: 15%;
+        font-size: 0.88rem;
+        color: #e2e8f0;
+    }
+    .chat-msg-ai {
+        background: rgba(17, 24, 39, 0.85);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 12px 12px 12px 4px;
+        padding: 0.75rem 1rem;
+        margin: 0.5rem 0;
+        margin-right: 10%;
+        font-size: 0.88rem;
+        color: #e2e8f0;
+        line-height: 1.55;
+    }
+    .chat-msg-ai b, .chat-msg-ai strong { color: #38bdf8; }
+    .chat-sql-badge {
+        display: inline-block;
+        background: rgba(139, 92, 246, 0.15);
+        border: 1px solid rgba(139, 92, 246, 0.3);
+        color: #c084fc;
+        font-size: 0.68rem;
+        font-family: 'JetBrains Mono', monospace;
+        padding: 0.15rem 0.5rem;
+        border-radius: 4px;
+        margin-top: 0.4rem;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -773,6 +820,86 @@ with tab_dossier:
                 </div>
             </div>
             """, unsafe_allow_html=True)
+
+
+    # ==========================================
+    # CONVERSATIONAL AI CHAT (inside Credit Dossier tab)
+    # ==========================================
+    st.markdown("---")
+    st.markdown("### FinSight AI Chat — Ask Anything About Your SME Data")
+    st.markdown("""
+    <div style="font-size: 0.82rem; color: #94a3b8; margin-bottom: 0.75rem;">
+        Ask questions in natural language. FinSight will query the DuckDB database, run analytics, and give you
+        data-grounded answers. Powered by <b style="color: #38bdf8;">Google Gemini</b> + <b style="color: #34d399;">DuckDB text-to-SQL</b>.
+    </div>
+    """, unsafe_allow_html=True)
+
+    # Display chat history
+    for msg in st.session_state["chat_history"]:
+        if msg["role"] == "user":
+            st.markdown(f'<div class="chat-msg-user">{msg["content"]}</div>', unsafe_allow_html=True)
+        else:
+            st.markdown(f'<div class="chat-msg-ai">{msg["content"]}</div>', unsafe_allow_html=True)
+            if msg.get("sql_query"):
+                st.markdown(
+                    f'<div class="chat-sql-badge">SQL: {msg["sql_query"][:120]}{"..." if len(msg.get("sql_query","")) > 120 else ""}</div>',
+                    unsafe_allow_html=True,
+                )
+
+    # Quick-ask buttons
+    st.markdown("<div style='margin: 0.5rem 0;'>", unsafe_allow_html=True)
+    qb_cols = st.columns(4)
+    quick_questions = [
+        "What is EcoTex's DSCR and is it safe?",
+        "Compare all 3 companies' financials",
+        "Show me Milan NPL vs national average",
+        "What ESG evidence supports EcoTex?",
+    ]
+    for i, qq in enumerate(quick_questions):
+        with qb_cols[i]:
+            if st.button(qq, key=f"qq_{i}", width="stretch"):
+                st.session_state["_pending_chat_q"] = qq
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    # Chat input
+    chat_input = st.chat_input("Ask FinSight AI about SME financials, credit risk, ESG...")
+
+    # Handle quick-button click
+    pending_q = st.session_state.pop("_pending_chat_q", None)
+    active_question = chat_input or pending_q
+
+    if active_question:
+        # Add user message to history
+        st.session_state["chat_history"].append({"role": "user", "content": active_question})
+
+        # Call the chat engine
+        with st.spinner("FinSight AI is analyzing your query..."):
+            result = chat_engine(
+                question=active_question,
+                company_id=active_cid,
+                conversation_history=st.session_state["chat_history"],
+            )
+
+        # Build assistant message
+        ai_msg = {
+            "role": "assistant",
+            "content": result["answer"],
+            "sql_query": result.get("sql_query"),
+            "mode": result.get("mode", "template_fallback"),
+        }
+        st.session_state["chat_history"].append(ai_msg)
+
+        # Show mode indicator
+        if result.get("error"):
+            st.toast(result["error"], icon="⚠️")
+
+        st.rerun()
+
+    # Clear chat button
+    if st.session_state["chat_history"]:
+        if st.button("🗑 Clear Chat History", key="clear_chat"):
+            st.session_state["chat_history"] = []
+            st.rerun()
 
 
 # ==========================================
