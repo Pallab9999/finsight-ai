@@ -16,6 +16,7 @@ HANDOFF NOTE FOR TEAMMATE B (Backend / AI Integration):
   or returns non-200 responses.
 """
 
+import hashlib
 import os
 import sys
 from typing import Dict, Any
@@ -30,6 +31,16 @@ import plotly.graph_objects as go
 
 from app.mock_data import get_base_demo_payload, calculate_scenario
 from app.api_client import evaluate_application, DEFAULT_BACKEND_URL
+from analytics.nl_query import run_nl_query
+from backend.speech import mime_for, stt_available, transcribe
+from ingestion.document_upload import (
+    SUPPORTED_SUFFIXES,
+    UnsupportedDocument,
+    delete_document,
+    list_companies,
+    list_uploaded_documents,
+    store_document,
+)
 
 
 # ==========================================
@@ -317,7 +328,7 @@ magic_query_text = (
     "a textile manufacturer in Milan."
 )
 
-if st.sidebar.button("⚡ Quick-Load EcoTex Milano (€750k)", use_container_width=True):
+if st.sidebar.button("⚡ Quick-Load EcoTex Milano (€750k)", width="stretch"):
     st.session_state["query_input"] = magic_query_text
 
 # Initial query state
@@ -413,7 +424,7 @@ with col_query:
 with col_btn:
     st.write("")  # Spacing
     st.write("")
-    run_eval = st.button("🚀 Evaluate", type="primary", use_container_width=True)
+    run_eval = st.button("🚀 Evaluate", type="primary", width="stretch")
 
 
 # Evaluate application via api_client (either Live or Deterministic Fallback)
@@ -450,7 +461,7 @@ kpi_c1, kpi_c2, kpi_c3, kpi_c4 = st.columns([1.2, 1.2, 1, 1])
 with kpi_c1:
     fin_score = payload.get("financial_score", 82)
     fig_fin = create_gauge_chart(fin_score, "Financial Health Score", benchmark=70, color_theme="blue")
-    st.plotly_chart(fig_fin, use_container_width=True)
+    st.plotly_chart(fig_fin, width="stretch")
     st.markdown("""
     <div style="text-align: center; margin-top: -15px;">
         <span class="finsight-badge badge-primary">Weight: 50%</span>
@@ -462,7 +473,7 @@ with kpi_c1:
 with kpi_c2:
     esg_score = payload.get("esg_score", 91)
     fig_esg = create_gauge_chart(esg_score, "ESG Alignment Score", benchmark=75, color_theme="emerald")
-    st.plotly_chart(fig_esg, use_container_width=True)
+    st.plotly_chart(fig_esg, width="stretch")
     st.markdown("""
     <div style="text-align: center; margin-top: -15px;">
         <span class="finsight-badge badge-success">EU Green Taxonomy</span>
@@ -721,7 +732,225 @@ with result_col:
 
 
 # ==========================================
-# 8. RESPONSIBLE AI & COMPLIANCE POSITIONING
+# 8. MANUAL DOCUMENT INTAKE
+# ==========================================
+st.markdown("---")
+st.markdown("## Manual Document Intake")
+st.caption(
+    "Upload underwriting documents to ground the assessment. Files are chunked into "
+    "the same evidence index the seeded reports use, so new material is retrievable "
+    "immediately and appears in the Grounded Evidence Explorer above."
+)
+
+intake_left, intake_right = st.columns([3, 2])
+
+with intake_left:
+    available_companies = list_companies()
+    current_company = payload.get("company", "EcoTex Milano")
+    default_index = (
+        available_companies.index(current_company)
+        if current_company in available_companies
+        else 0
+    )
+
+    if available_companies:
+        target_company = st.selectbox(
+            "Attach documents to",
+            options=available_companies,
+            index=default_index,
+            help="Evidence retrieval is filtered by company, so this determines "
+                 "which assessment the document can support.",
+        )
+    else:
+        target_company = current_company
+        st.warning("No companies are indexed yet. Seed the database first.")
+
+    doc_type = st.selectbox(
+        "Document type",
+        options=[
+            "Financial Statement",
+            "ESG / Sustainability Report",
+            "Bank Statement",
+            "Board Minutes",
+            "Loan Agreement",
+            "Business Plan",
+            "Other Supporting Document",
+        ],
+        index=0,
+    )
+
+    uploaded_files = st.file_uploader(
+        f"Select files ({', '.join(s.lstrip('.').upper() for s in SUPPORTED_SUFFIXES)})",
+        type=[s.lstrip(".") for s in SUPPORTED_SUFFIXES],
+        accept_multiple_files=True,
+        help="Scanned PDFs without a text layer cannot be indexed; they would need OCR.",
+    )
+
+    if uploaded_files and st.button(
+        f"Index {len(uploaded_files)} document(s)", type="primary", width="stretch"
+    ):
+        indexed, failed = [], []
+        for file in uploaded_files:
+            try:
+                result = store_document(
+                    file.name,
+                    file.getvalue(),
+                    company_name=target_company,
+                    document_type=doc_type,
+                )
+                indexed.append(result)
+            except UnsupportedDocument as exc:
+                failed.append((file.name, str(exc)))
+            except Exception as exc:
+                failed.append((file.name, f"{type(exc).__name__}: {exc}"))
+
+        for result in indexed:
+            st.success(
+                f"Indexed **{result['filename']}** into {result['chunks']} "
+                f"retrievable chunk(s) for {result['company_name']}."
+            )
+        for name, reason in failed:
+            st.error(f"**{name}** could not be indexed. {reason}")
+
+        if indexed:
+            st.info("Re-running the assessment so the new evidence is reflected above.")
+            st.rerun()
+
+with intake_right:
+    st.markdown("**Currently indexed uploads**")
+    existing_uploads = list_uploaded_documents()
+
+    if not existing_uploads:
+        st.caption("No manual uploads yet. Seeded evidence is still in use.")
+    else:
+        for doc in existing_uploads:
+            row_left, row_right = st.columns([5, 1])
+            with row_left:
+                st.markdown(
+                    f"<div style='font-size:0.8rem;color:#f1f5f9;'>{doc['filename']}</div>"
+                    f"<div style='font-size:0.7rem;color:#94a3b8;'>"
+                    f"{doc['document_type']} · {doc['chunks']} chunk(s) · {doc['company_name']}"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+            with row_right:
+                if st.button("Remove", key=f"del-{doc['document_id']}"):
+                    delete_document(doc["document_id"])
+                    st.rerun()
+
+
+# ==========================================
+# 9. VOICE ANALYTICS CONSOLE
+# ==========================================
+st.markdown("---")
+st.markdown("## Voice Analytics Console")
+st.caption(
+    "Ask an analytics question by voice or text. The question is translated into "
+    "read-only SQL against the DuckDB analytics tables, so answers come from the "
+    "data rather than from the model's memory."
+)
+
+if not stt_available():
+    st.info(
+        "**Voice and natural-language analytics need a Gemini API key.** Unlike the "
+        "scoring pipeline, which is fully deterministic and needs no credentials, this "
+        "feature cannot answer without one. Set `GEMINI_API_KEY` in `.env` locally, or "
+        "under Streamlit **Settings → Secrets** when hosted, then reload."
+    )
+
+voice_col, text_col = st.columns([2, 3])
+
+with voice_col:
+    st.markdown("**Speak your question**")
+    recorded = st.audio_input(
+        "Record", label_visibility="collapsed", disabled=not stt_available()
+    )
+
+    if recorded is not None and stt_available():
+        audio_bytes = recorded.getvalue()
+        # Streamlit replays the same recording on every rerun, so transcribe each
+        # distinct clip once rather than on each script pass.
+        fingerprint = hashlib.sha256(audio_bytes).hexdigest()[:16]
+        if st.session_state.get("voice_fingerprint") != fingerprint:
+            with st.spinner("Transcribing..."):
+                transcript, stt_status = transcribe(
+                    audio_bytes, mime_type=mime_for(getattr(recorded, "name", "audio.wav"))
+                )
+            st.session_state["voice_fingerprint"] = fingerprint
+            st.session_state["voice_status"] = stt_status
+            if transcript:
+                st.session_state["question_seed"] = transcript
+                st.rerun()
+
+        if status := st.session_state.get("voice_status"):
+            st.caption(status)
+
+with text_col:
+    st.markdown("**Or type it**")
+    # The text box is deliberately keyless: a transcript or example arrives via
+    # `question_seed`, and Streamlit forbids writing to a widget's own key after
+    # that widget has been instantiated.
+    analytics_question = st.text_input(
+        "Question",
+        value=st.session_state.get("question_seed", ""),
+        label_visibility="collapsed",
+        placeholder="e.g. Which provinces have the highest loan default rate?",
+    )
+
+    example_questions = [
+        "What is EcoTex Milano's revenue and EBITDA?",
+        "Which province has the highest loan default rate?",
+        "Show sector turnover in Milano by year",
+    ]
+    chosen_example = st.selectbox(
+        "Example questions", options=["-"] + example_questions, index=0
+    )
+    if chosen_example != "-" and st.button("Use this example"):
+        st.session_state["question_seed"] = chosen_example
+        st.rerun()
+
+    run_query = st.button(
+        "Run analytics query",
+        type="primary",
+        disabled=not (analytics_question and stt_available()),
+    )
+
+if run_query and analytics_question:
+    with st.spinner("Translating your question into SQL and querying DuckDB..."):
+        nl_result = run_nl_query(analytics_question)
+
+    if nl_result["error"]:
+        st.error(nl_result["error"])
+        if nl_result["sql"]:
+            with st.expander("SQL that was rejected"):
+                st.code(nl_result["sql"], language="sql")
+    else:
+        guard_note = (
+            "read-only connection" if nl_result["read_only"] else "guarded connection"
+        )
+        st.success(
+            f"{nl_result['row_count']} row(s) returned via {guard_note}. "
+            "Every answer below is computed by SQL over your indexed data."
+        )
+        if nl_result["rows"]:
+            st.dataframe(
+                [dict(zip(nl_result["columns"], row)) for row in nl_result["rows"]],
+                width="stretch",
+                hide_index=True,
+            )
+        else:
+            st.caption(nl_result["status"])
+
+        with st.expander("Show the generated SQL"):
+            st.code(nl_result["sql"], language="sql")
+            st.caption(
+                "Validated as a single read-only SELECT with an enforced row limit "
+                "before execution."
+            )
+
+
+# ==========================================
+# 10. RESPONSIBLE AI & COMPLIANCE POSITIONING
 # ==========================================
 st.markdown("""
 <div class="compliance-footer">
