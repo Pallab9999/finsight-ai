@@ -1,15 +1,22 @@
 ﻿"""
 FinSight AI - Backend Integration Client
-Calls FinSight FastAPI POST /evaluate with automatic deterministic fallback.
+
+Resolution order for an evaluation:
+  1. HTTP call to the FastAPI backend (local dev, two-process setup)
+  2. In-process call to the same pipeline (single-process hosting e.g. Streamlit Cloud)
+  3. Precomputed deterministic payload (demo safety net)
 """
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import httpx
 
 from app.mock_data import calculate_scenario, get_base_demo_payload
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_BACKEND_URL = "http://localhost:8000"
 
@@ -38,6 +45,26 @@ def _enrich_payload(data: dict[str, Any]) -> dict[str, Any]:
     return data
 
 
+def _evaluate_in_process(
+    query: str,
+    scenario_loan_amount: int | None,
+) -> dict[str, Any] | None:
+    """Run the real pipeline inside this process.
+
+    Used when no HTTP backend is reachable, which is the case on single-process
+    hosting. Imports are local so that a missing backend dependency degrades to
+    the precomputed payload instead of breaking the UI at import time.
+    """
+    try:
+        from backend.agent import evaluate_request
+
+        result = evaluate_request(query, scenario_loan_amount)
+        return _enrich_payload(result.model_dump())
+    except Exception as exc:
+        logger.warning("In-process evaluation failed: %s", exc)
+        return None
+
+
 def evaluate_application(
     query: str,
     loan_amount: int = 750_000,
@@ -48,7 +75,7 @@ def evaluate_application(
 ) -> tuple[dict[str, Any], str, str]:
     """
     Returns (payload, mode, status_message).
-    mode is LIVE_API or DETERMINISTIC_FALLBACK.
+    mode is LIVE_API, IN_PROCESS, or DETERMINISTIC_FALLBACK.
     """
     if force_mock:
         payload = get_base_demo_payload()
@@ -63,22 +90,26 @@ def evaluate_application(
     if scenario_loan_amount:
         request_data["scenario_loan_amount"] = scenario_loan_amount
 
+    http_status: str
     try:
         with httpx.Client(timeout=timeout_seconds) as client:
             response = client.post(target_endpoint, json=request_data)
         if response.status_code == 200:
             data = _enrich_payload(response.json())
             return data, "LIVE_API", f"Successfully evaluated via FastAPI ({target_endpoint})."
-        fallback = get_base_demo_payload()
-        return (
-            fallback,
-            "DETERMINISTIC_FALLBACK",
-            f"Backend returned HTTP {response.status_code}. Using deterministic fallback.",
-        )
+        http_status = f"Backend returned HTTP {response.status_code}"
     except httpx.RequestError as exc:
-        fallback = get_base_demo_payload()
+        http_status = f"Backend unreachable at {target_endpoint} ({type(exc).__name__})"
+
+    if (data := _evaluate_in_process(query, scenario_loan_amount)) is not None:
         return (
-            fallback,
-            "DETERMINISTIC_FALLBACK",
-            f"Backend unreachable at {target_endpoint} ({type(exc).__name__}). Using fallback.",
+            data,
+            "IN_PROCESS",
+            f"{http_status}. Evaluated in-process via the same deterministic pipeline.",
         )
+
+    return (
+        get_base_demo_payload(),
+        "DETERMINISTIC_FALLBACK",
+        f"{http_status}. Using precomputed deterministic payload.",
+    )

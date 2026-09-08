@@ -293,9 +293,13 @@ st.sidebar.markdown("""
 # Connection Mode Selection
 connection_mode = st.sidebar.radio(
     "Data Connectivity Mode:",
-    options=["Deterministic Fallback (Demo Safe)", "Live API (FastAPI)"],
+    options=["Live Engine (Real Pipeline)", "Deterministic Fallback (Demo Safe)"],
     index=0,
-    help="Deterministic Fallback guarantees 0% crash risk during live pitch. Live API connects to backend POST /evaluate."
+    help=(
+        "Live Engine calls the FastAPI backend, falling back to the same pipeline "
+        "in-process when no HTTP backend is reachable. Deterministic Fallback serves "
+        "a precomputed payload and guarantees zero crash risk during a live pitch."
+    )
 )
 
 backend_url = st.sidebar.text_input(
@@ -422,10 +426,17 @@ with st.spinner("FinSight AI is orchestrating deterministic scoring & grounded e
     )
 
 # Execution banner
-if execution_mode == "LIVE_API":
-    st.markdown(f'<div style="font-size: 0.75rem; color: #34d399; margin-bottom: 1rem;">🟢 <b>LIVE FASTAPI ENGINE</b>: {status_msg}</div>', unsafe_allow_html=True)
-else:
-    st.markdown(f'<div style="font-size: 0.75rem; color: #fbbf24; margin-bottom: 1rem;">🟡 <b>DEMO SAFE MODE</b>: {status_msg}</div>', unsafe_allow_html=True)
+_BANNERS = {
+    "LIVE_API": ("#34d399", "🟢", "LIVE FASTAPI ENGINE"),
+    "IN_PROCESS": ("#38bdf8", "🔵", "LIVE ENGINE (IN-PROCESS)"),
+    "DETERMINISTIC_FALLBACK": ("#fbbf24", "🟡", "DEMO SAFE MODE"),
+}
+_color, _icon, _label = _BANNERS.get(execution_mode, _BANNERS["DETERMINISTIC_FALLBACK"])
+st.markdown(
+    f'<div style="font-size: 0.75rem; color: {_color}; margin-bottom: 1rem;">'
+    f'{_icon} <b>{_label}</b>: {status_msg}</div>',
+    unsafe_allow_html=True,
+)
 
 
 # ==========================================

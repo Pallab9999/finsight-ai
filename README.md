@@ -49,6 +49,39 @@ The `audit_trail` in every response records which provider produced the summary.
 
 Credentials live only in `.env`, which is gitignored. Never commit them.
 
+## Execution modes
+
+The dashboard resolves an evaluation in three stages, so it never hard-depends on
+a running backend:
+
+| Mode | Banner | When |
+|---|---|---|
+| `LIVE_API` | 🟢 | FastAPI reachable over HTTP (local two-process setup) |
+| `IN_PROCESS` | 🔵 | No HTTP backend; the same pipeline runs inside the Streamlit process |
+| `DETERMINISTIC_FALLBACK` | 🟡 | Pipeline unavailable, or "Demo Safe" selected in the sidebar |
+
+`IN_PROCESS` is what makes single-process hosting work: identical scoring code and
+identical numbers, just without the network hop.
+
+## Deploy to Streamlit Community Cloud
+
+The DuckDB file is gitignored and self-seeds on first request, so no data setup is
+needed at deploy time.
+
+1. Go to [share.streamlit.io](https://share.streamlit.io) and sign in with GitHub
+2. **New app** → **Deploy a public app from GitHub**
+3. Repository `Pallab9999/finsight-ai`, branch `main`, main file path `app/main.py`
+4. Optional — under **Advanced settings → Secrets**, add a provider key for
+   LLM-written summaries (Streamlit exposes secrets as environment variables):
+
+   ```toml
+   GEMINI_API_KEY = "your-key"
+   ```
+
+5. **Deploy**
+
+The app boots in `IN_PROCESS` mode and serves the real deterministic pipeline.
+
 ## Project Layout
 
 ```
