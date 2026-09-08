@@ -63,7 +63,7 @@ def test_multi_company_evaluation_produces_different_scores():
     assert mec["company"] != agro["company"]
 
 
-def test_unreachable_backend_falls_back_to_in_process():
+def test_unreachable_backend_falls_back_to_duckdb():
     payload, mode, status = api_client.evaluate_application(
         DEMO,
         company_id="ecotex",
@@ -71,17 +71,24 @@ def test_unreachable_backend_falls_back_to_in_process():
         timeout_seconds=2.0,
     )
 
-    assert mode == "IN_PROCESS"
+    assert mode == "DETERMINISTIC_FALLBACK"
     assert payload["financial_score"] > 0
-    assert payload["scenario"]["recommendation"] in ("APPROVE", "REVIEW", "DECLINE")
+    assert payload["recommendation"] in ("APPROVE", "REVIEW", "DECLINE")
+    assert "fallback" in status.lower() or "unreachable" in status.lower()
 
 
 def test_scenario_produces_different_outcome():
-    eco, _, _ = api_client.evaluate_application(DEMO, company_id="ecotex", loan_amount=750_000, force_mock=True)
+    base, _, _ = api_client.evaluate_application(
+        DEMO, company_id="ecotex", loan_amount=750_000, force_mock=True
+    )
+    stressed, mode, _ = api_client.simulate_scenario_api(
+        "ecotex", 1_000_000, base_payload=base, force_mock=True
+    )
 
-    assert "scenario" in eco
-    assert eco["scenario"]["loan_amount"] == 1_000_000
-    assert eco["scenario"]["recommendation"] in ("APPROVE", "REVIEW", "DECLINE")
+    assert mode == "DETERMINISTIC_FALLBACK"
+    assert stressed["loan_amount"] == 1_000_000
+    assert stressed["recommendation"] in ("APPROVE", "REVIEW", "DECLINE")
+    assert stressed["financial_score"] <= base["financial_score"]
 
 
 def test_csv_upload_ingests_and_changes_score():

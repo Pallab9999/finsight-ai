@@ -102,10 +102,8 @@ Because an LLM writes that SQL, three independent guards contain it:
 
 The generated SQL is always shown in the UI, so every answer is auditable.
 
-**This is the one feature that requires a key.** The scoring pipeline is fully
-deterministic and runs with no credentials, but natural-language analytics cannot
-answer without `GEMINI_API_KEY` — it reports that rather than degrading, since a
-wrong number is worse than no number.
+Voice Analytics answers from DuckDB even without an LLM key. A Bedrock API key
+(prefix `ABSK`) or `GEMINI_API_KEY` enables the microphone and richer wording.
 
 ## Deploy to Streamlit Community Cloud
 
@@ -115,16 +113,18 @@ needed at deploy time.
 1. Go to [share.streamlit.io](https://share.streamlit.io) and sign in with GitHub
 2. **New app** → **Deploy a public app from GitHub**
 3. Repository `Pallab9999/finsight-ai`, branch `main`, main file path `app/main.py`
-4. Optional — under **Advanced settings → Secrets**, add a provider key for
-   LLM-written summaries (Streamlit exposes secrets as environment variables):
+4. Optional — under **Advanced settings → Secrets**, add a provider key
+   (Streamlit exposes secrets as environment variables):
 
    ```toml
+   AWS_BEARER_TOKEN_BEDROCK = "ABSK..."
    GEMINI_API_KEY = "your-key"
    ```
 
 5. **Deploy**
 
-The app boots in `IN_PROCESS` mode and serves the real deterministic pipeline.
+The app boots with local DuckDB scoring. Typed Voice Analytics questions work
+without secrets; the microphone needs a valid Bedrock or Gemini key.
 
 ## Project Layout
 

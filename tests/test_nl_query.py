@@ -97,14 +97,18 @@ def test_run_nl_query_needs_a_question():
     assert result["error"] == "Ask a question first."
 
 
-def test_run_nl_query_reports_missing_key_instead_of_guessing(monkeypatch):
-    """Without a key this feature must say so, not fabricate an answer."""
+def test_run_nl_query_answers_from_duckdb_without_llm(monkeypatch):
+    """Without a usable LLM key, questions still resolve against DuckDB."""
     monkeypatch.setattr("analytics.nl_query.gemini_key", lambda: "")
+    monkeypatch.setattr("analytics.nl_query.bedrock_available", lambda: False)
+    monkeypatch.setattr("analytics.nl_query.bedrock_api_key_format_ok", lambda: False)
 
     result = run_nl_query("What is EcoTex revenue?")
 
-    assert result["rows"] == []
-    assert "GEMINI_API_KEY" in result["error"]
+    assert result["error"] is None
+    assert result["row_count"] >= 1
+    assert result["answer"]
+    assert "EcoTex" in result["answer"] or "EcoTex Milano" in [row[0] for row in result["rows"]]
 
 
 def test_run_nl_query_surfaces_guard_rejection(monkeypatch):
@@ -131,3 +135,29 @@ def test_run_nl_query_executes_generated_select(monkeypatch):
     assert result["columns"] == ["company_name", "revenue"]
     assert result["row_count"] >= 1
     assert "EcoTex Milano" in [row[0] for row in result["rows"]]
+
+
+def test_run_nl_query_answers_from_snapshot_when_sql_fails(monkeypatch):
+    monkeypatch.setattr(
+        "analytics.nl_query.generate_sql",
+        lambda q: (None, "That question cannot be answered from the available tables."),
+    )
+    monkeypatch.setattr("analytics.nl_query.heuristic_sql", lambda q: None)
+    monkeypatch.setattr("analytics.nl_query.lakehouse_sql", lambda q: None)
+    monkeypatch.setattr(
+        "analytics.nl_query.complete_text",
+        lambda prompt, max_tokens=700, temperature=0.2: (
+            "EcoTex Milano revenue is 14.2 million euro.",
+            "bedrock",
+        ),
+    )
+    monkeypatch.setattr(
+        "analytics.nl_query._data_brief",
+        lambda: "company_financials\ncompany_name,revenue\nEcoTex Milano,14200000\n",
+    )
+
+    result = run_nl_query("What is EcoTex revenue?")
+
+    assert result["error"] is None
+    assert "14.2 million" in result["answer"]
+    assert "live credit data" in result["status"]

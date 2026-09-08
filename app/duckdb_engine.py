@@ -185,6 +185,208 @@ def seed_initial_data(con: duckdb.DuckDBPyConnection):
         """)
 
 
+def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    out.columns = [
+        str(c).strip().lower().replace(" ", "_").replace("-", "_") for c in out.columns
+    ]
+    return out
+
+
+def _load_csv_dataframe(file_bytes: bytes) -> pd.DataFrame:
+    last_err: Optional[Exception] = None
+    for sep in [",", ";", "\t", "|"]:
+        for encoding in ("utf-8-sig", "utf-8", "latin-1"):
+            try:
+                df = pd.read_csv(io.BytesIO(file_bytes), sep=sep, encoding=encoding)
+                if df.shape[1] >= 2:
+                    return _normalize_columns(df)
+            except Exception as exc:
+                last_err = exc
+    raise ValueError(f"Could not parse CSV ({last_err})")
+
+
+def _to_number(value: Any) -> Optional[float]:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip()
+    if not text or text.lower() in {"nan", "null", "none", "-"}:
+        return None
+    text = text.replace("€", "").replace("$", "").replace(" ", "")
+    if text.count(",") == 1 and text.count(".") == 0:
+        text = text.replace(",", ".")
+    else:
+        text = text.replace(",", "")
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def _last_numeric(series: pd.Series) -> Optional[float]:
+    parsed = pd.to_numeric(series.map(_to_number), errors="coerce").dropna()
+    if parsed.empty:
+        return None
+    return float(parsed.iloc[-1])
+
+
+def _matching_column(df: pd.DataFrame, aliases: List[str]) -> Optional[str]:
+    for alias in aliases:
+        for col in df.columns:
+            if col == alias or alias in col:
+                return col
+    return None
+
+
+def _named_metric(df: pd.DataFrame, aliases: List[str]) -> Optional[float]:
+    col = _matching_column(df, aliases)
+    if col is None:
+        return None
+    return _last_numeric(df[col])
+
+
+def _extract_named_statement(df: pd.DataFrame) -> Optional[Dict[str, Any]]:
+    revenue = _named_metric(df, ["revenue", "fatturato", "turnover", "sales", "valore_della_produzione", "operating_income"])
+    if revenue is None or revenue <= 0:
+        return None
+    ebitda = _named_metric(df, ["ebitda", "margine_operativo_lordo", "mol"])
+    net_income = _named_metric(df, ["net_income", "utile_netto", "net_profit", "profit"])
+    total_assets = _named_metric(df, ["total_assets", "totale_attivo", "assets"])
+    net_equity = _named_metric(df, ["net_equity", "patrimonio_netto", "equity"])
+    total_debt = _named_metric(df, ["total_debt", "totale_debiti", "debt", "liabilities"])
+    short_term_debt = _named_metric(df, ["short_term_debt", "debiti_breve_termine"])
+    cash = _named_metric(df, ["cash_and_equivalents", "cassa_e_disponibilita", "cash", "liquidity"])
+    capex = _named_metric(df, ["capex", "investimenti_capex", "investments"])
+    year_val = _named_metric(df, ["fiscal_year", "year", "anno"])
+    return {
+        "fiscal_year": int(year_val) if year_val else datetime.datetime.now().year,
+        "revenue": revenue,
+        "ebitda": ebitda if ebitda is not None else revenue * 0.15,
+        "net_income": net_income if net_income is not None else (ebitda or revenue * 0.15) * 0.45,
+        "total_assets": total_assets if total_assets is not None else revenue * 1.1,
+        "net_equity": net_equity if net_equity is not None else (total_assets or revenue * 1.1) * 0.38,
+        "total_debt": total_debt if total_debt is not None else (total_assets or revenue * 1.1) * 0.30,
+        "short_term_debt": short_term_debt if short_term_debt is not None else (total_debt or revenue * 0.3) * 0.25,
+        "cash_and_equivalents": cash if cash is not None else revenue * 0.10,
+        "capex": capex if capex is not None else revenue * 0.05,
+        "source": "named columns",
+    }
+
+
+def _extract_wide_line_items(df: pd.DataFrame) -> Optional[Dict[str, Any]]:
+    if df.empty or df.shape[1] < 2:
+        return None
+    label_col = df.columns[0]
+    year_cols = [c for c in df.columns[1:] if any(ch.isdigit() for ch in str(c))]
+    if not year_cols:
+        return None
+    latest = year_cols[-1]
+    labels = df[label_col].astype(str).str.lower()
+
+    def pick(*keywords: str) -> Optional[float]:
+        mask = labels.apply(lambda text: any(k in text for k in keywords))
+        if not mask.any():
+            return None
+        return _last_numeric(df.loc[mask, latest])
+
+    revenue = pick("fatturato", "revenue", "turnover", "sales", "produzione", "ricavi")
+    if revenue is None or revenue <= 0:
+        return None
+    ebitda = pick("ebitda", "mol", "margine operativo")
+    return {
+        "fiscal_year": int("".join(ch for ch in str(latest) if ch.isdigit())[:4] or datetime.datetime.now().year),
+        "revenue": revenue,
+        "ebitda": ebitda if ebitda else revenue * 0.15,
+        "net_income": pick("utile", "net income", "profit") or (ebitda or revenue * 0.15) * 0.45,
+        "total_assets": pick("attivo", "total assets") or revenue * 1.1,
+        "net_equity": pick("patrimonio", "equity") or revenue * 0.4,
+        "total_debt": pick("debiti", "debt") or revenue * 0.3,
+        "short_term_debt": pick("breve") or revenue * 0.08,
+        "cash_and_equivalents": pick("cassa", "cash", "liquide") or revenue * 0.1,
+        "capex": pick("capex", "investimenti") or revenue * 0.05,
+        "source": f"wide line items ({latest})",
+    }
+
+
+def _extract_long_series(df: pd.DataFrame) -> Optional[Dict[str, Any]]:
+    value_col = _matching_column(df, ["data_value", "datavalue", "obs_value", "value", "importo", "valore", "amount"])
+    if value_col is None:
+        return None
+    title_cols = [c for c in df.columns if "title" in c or c in ("variable", "metric", "indicator", "series", "description")]
+    if not title_cols:
+        return None
+
+    work = df.copy()
+    work["_value"] = pd.to_numeric(work[value_col].map(_to_number), errors="coerce")
+    mag_col = _matching_column(df, ["magnitude", "magn", "magntude", "unit_multiplier"])
+    if mag_col:
+        mag = pd.to_numeric(work[mag_col], errors="coerce").fillna(0)
+        # Stats NZ: magnitude 6 => millions. Skip if values already look like full currency.
+        if work["_value"].abs().median() < 10_000_000:
+            work["_value"] = work["_value"] * (10 ** mag)
+
+    period_col = _matching_column(df, ["period", "time_period", "time", "year", "quarter", "date"])
+    fiscal_year = datetime.datetime.now().year
+    if period_col:
+        periods = work[period_col].dropna().astype(str)
+        if not periods.empty:
+            latest = sorted(periods.unique())[-1]
+            work = work[work[period_col].astype(str) == latest]
+            digits = "".join(ch for ch in latest if ch.isdigit())[:4]
+            if digits:
+                fiscal_year = int(digits)
+
+    label = work[title_cols[0]].astype(str).str.lower()
+
+    def pick(*keywords: str) -> Optional[float]:
+        mask = label.apply(lambda text: any(k in text for k in keywords))
+        subset = work.loc[mask & work["_value"].notna()]
+        if subset.empty:
+            return None
+        for extra in title_cols[1:]:
+            totals = subset[subset[extra].astype(str).str.lower().str.contains("total", na=False)]
+            if not totals.empty:
+                subset = totals
+                break
+        return float(subset["_value"].median())
+
+    revenue = pick("sales", "operating income", "revenue", "turnover", "fatturato")
+    if revenue is None or revenue <= 0:
+        return None
+    purchases = pick("purchase", "operating expenditure", "opex")
+    wages = pick("salaries", "wages", "personale")
+    ebitda = revenue
+    if purchases:
+        ebitda -= abs(purchases)
+    if wages:
+        ebitda -= abs(wages)
+    if ebitda <= 0:
+        ebitda = revenue * 0.12
+    return {
+        "fiscal_year": fiscal_year,
+        "revenue": revenue,
+        "ebitda": ebitda,
+        "net_income": ebitda * 0.45,
+        "total_assets": revenue * 1.1,
+        "net_equity": revenue * 0.38,
+        "total_debt": revenue * 0.30,
+        "short_term_debt": revenue * 0.08,
+        "cash_and_equivalents": revenue * 0.10,
+        "capex": revenue * 0.05,
+        "source": "series / statistical table",
+    }
+
+
+def _extract_statement_metrics(df: pd.DataFrame) -> Optional[Dict[str, Any]]:
+    for extractor in (_extract_named_statement, _extract_wide_line_items, _extract_long_series):
+        metrics = extractor(df)
+        if metrics:
+            return metrics
+    return None
+
+
 def parse_and_ingest_csv(file_bytes: bytes, filename: str, company_id: str) -> Dict[str, Any]:
     """
     Parses an uploaded balance sheet CSV file.
@@ -197,34 +399,26 @@ def parse_and_ingest_csv(file_bytes: bytes, filename: str, company_id: str) -> D
     file_hash = hashlib.sha256(file_bytes).hexdigest()[:16].upper()
 
     try:
-        # Detect delimiter
-        for sep in [",", ";", "\t"]:
-            try:
-                df = pd.read_csv(io.BytesIO(file_bytes), sep=sep)
-                if df.shape[1] > 2:
-                    break
-            except Exception:
-                continue
-
-        norm_cols = [c.strip().lower().replace(" ", "_") for c in df.columns]
-        df.columns = norm_cols
-
+        df = _load_csv_dataframe(file_bytes)
+        rows_count = len(df)
         evidences = []
-        is_statutory_cee = any("codice" in c or "voce" in c or "sezione" in c for c in norm_cols)
+        is_statutory_cee = any("codice" in c or "voce" in c or "sezione" in c for c in df.columns)
+        metrics: Optional[Dict[str, Any]] = None
 
         if is_statutory_cee:
-            # Multi-line Statutory Italian Bilancio CEE
-            code_col = next((c for c in norm_cols if "codice" in c or "voce" in c), norm_cols[0])
-            desc_col = next((c for c in norm_cols if "descrizione" in c or "nome" in c), norm_cols[1])
-            val_col = next((c for c in norm_cols if "2024" in c or "valore" in c or "importo" in c), norm_cols[2])
+            code_col = next((c for c in df.columns if "codice" in c or "voce" in c), df.columns[0])
+            desc_col = next((c for c in df.columns if "descrizione" in c or "nome" in c), df.columns[min(1, len(df.columns) - 1)])
+            val_col = next((c for c in df.columns if "2024" in c or "2025" in c or "valore" in c or "importo" in c), df.columns[min(2, len(df.columns) - 1)])
 
             df[code_col] = df[code_col].astype(str).str.strip()
             df[desc_col] = df[desc_col].astype(str).str.strip()
-            df[val_col] = pd.to_numeric(df[val_col].astype(str).str.replace(".", "", regex=False).str.replace(",", ".", regex=False), errors="coerce").fillna(0.0)
+            df[val_col] = pd.to_numeric(
+                df[val_col].astype(str).str.replace(".", "", regex=False).str.replace(",", ".", regex=False),
+                errors="coerce",
+            ).fillna(0.0)
 
-            sez_col = next((c for c in norm_cols if "sez" in c), None)
+            sez_col = next((c for c in df.columns if "sez" in c), None)
 
-            # Extract mapping by Code, Description, and Section
             def get_val(code_prefix, desc_keyword="", section_keyword=""):
                 sub_df = df
                 if sez_col and section_keyword:
@@ -236,113 +430,90 @@ def parse_and_ingest_csv(file_bytes: bytes, filename: str, company_id: str) -> D
 
             rev_sales = get_val("A.1", "ricavi delle vendite", "conto economico")
             rev_other = get_val("A.5", "altri ricavi", "conto economico")
-            revenue = rev_sales + rev_other if (rev_sales + rev_other) > 0 else 14200000.0
+            revenue = rev_sales + rev_other
+            if revenue > 0:
+                raw_mat = abs(get_val("B.6", "materie prime", "conto economico"))
+                services = abs(get_val("B.7", "servizi", "conto economico"))
+                leasing = abs(get_val("B.8", "godimento", "conto economico"))
+                personnel = abs(get_val("B.9", "personale", "conto economico"))
+                ammort = abs(get_val("B.10", "ammortamenti", "conto economico"))
+                other_costs = abs(get_val("B.14", "oneri diversi", "conto economico"))
+                op_costs = raw_mat + services + leasing + personnel + other_costs
+                ebitda = revenue - op_costs if op_costs > 0 else revenue * 0.174
+                net_income = get_val("E.21", "utile", "conto economico") or get_val("21", "utile netto", "conto economico")
+                immob = get_val("B.", "immobilizzazioni", "attivo")
+                circolante = get_val("C.", "attivo circolante", "attivo")
+                total_assets = immob + circolante
+                net_equity = get_val("A.", "patrimonio netto", "passivo")
+                debt_short = get_val("D.4.a", "banche entro", "passivo")
+                debt_long = get_val("D.4.b", "banche oltre", "passivo")
+                total_debt = debt_short + debt_long
+                cash = get_val("C.IV", "disponibilità liquide", "attivo")
+                metrics = {
+                    "fiscal_year": 2024,
+                    "revenue": revenue,
+                    "ebitda": ebitda,
+                    "net_income": net_income if net_income > 0 else ebitda * 0.45,
+                    "total_assets": total_assets if total_assets > 0 else revenue * 1.1,
+                    "net_equity": net_equity if net_equity > 0 else revenue * 0.38,
+                    "total_debt": total_debt if total_debt > 0 else revenue * 0.30,
+                    "short_term_debt": debt_short if debt_short > 0 else revenue * 0.08,
+                    "cash_and_equivalents": cash if cash > 0 else revenue * 0.10,
+                    "capex": ammort if ammort > 0 else revenue * 0.05,
+                    "source": "CEE Art. 2424-2425",
+                }
 
-            raw_mat = abs(get_val("B.6", "materie prime", "conto economico"))
-            services = abs(get_val("B.7", "servizi", "conto economico"))
-            leasing = abs(get_val("B.8", "godimento", "conto economico"))
-            personnel = abs(get_val("B.9", "personale", "conto economico"))
-            ammort = abs(get_val("B.10", "ammortamenti", "conto economico"))
-            other_costs = abs(get_val("B.14", "oneri diversi", "conto economico"))
+        if metrics is None:
+            metrics = _extract_statement_metrics(df)
 
-            op_costs = raw_mat + services + leasing + personnel + other_costs
-            ebitda = revenue - op_costs if op_costs > 0 else revenue * 0.174
+        if metrics is None:
+            return {
+                "status": "ERROR",
+                "message": (
+                    f"Could not map financial metrics in '{filename}'. "
+                    f"Found columns: {', '.join(df.columns[:12])}{'…' if len(df.columns) > 12 else ''}. "
+                    "Use a CEE bilancio, a summary CSV with a revenue/fatturato column, or a statistical table with a Sales series."
+                ),
+                "evidences": [],
+            }
 
-            net_income = get_val("E.21", "utile", "conto economico")
-            if net_income <= 0:
-                net_income = get_val("21", "utile netto", "conto economico")
-            if net_income <= 0:
-                net_income = 1150000.0
+        fiscal_year = int(metrics["fiscal_year"])
+        revenue = float(metrics["revenue"])
+        ebitda = float(metrics["ebitda"])
+        net_income = float(metrics["net_income"])
+        total_assets = float(metrics["total_assets"])
+        net_equity = float(metrics["net_equity"])
+        total_debt = float(metrics["total_debt"])
+        short_term_debt = max(1.0, float(metrics["short_term_debt"]))
+        cash_and_equivalents = float(metrics["cash_and_equivalents"])
+        capex = float(metrics["capex"])
+        extract_source = metrics.get("source", "uploaded file")
 
-            immob = get_val("B.", "immobilizzazioni", "attivo")
-            circolante = get_val("C.", "attivo circolante", "attivo")
-            total_assets = immob + circolante if (immob + circolante) > 0 else 15585000.0
-
-            net_equity = get_val("A.", "patrimonio netto", "passivo")
-            if net_equity <= 0:
-                net_equity = 5800000.0
-
-            debt_short = get_val("D.4.a", "banche entro", "passivo")
-            debt_long = get_val("D.4.b", "banche oltre", "passivo")
-            total_debt = debt_short + debt_long if (debt_short + debt_long) > 0 else 4700000.0
-            short_term_debt = debt_short if debt_short > 0 else 1150000.0
-
-            cash = get_val("C.IV", "disponibilità liquide", "attivo")
-            cash_and_equivalents = cash if cash > 0 else 1630000.0
-            capex = ammort if ammort > 0 else 920000.0
-            fiscal_year = 2024
-            rows_count = len(df)
-
-            # Build rich statutory evidence items
-            evidences.append({
-                "category": "FACT",
-                "source": f"{filename} (CEE Conto Economico Voce A.1 + A.5)",
-                "metric": "Valore della Produzione Certificato",
-                "value": f"€ {revenue:,.0f}",
-                "claim": f"Valore della produzione d'esercizio registrato a € {revenue:,.0f} (+14.2% YoY), comprovando solida espansione sul mercato core."
-            })
-            evidences.append({
-                "category": "CALCULATION",
-                "source": "Riclassificazione FinSight DuckDB",
-                "metric": "MOL / EBITDA Gestionale",
-                "value": f"€ {ebitda:,.0f} ({ebitda/revenue*100:.1f}%)",
-                "claim": f"EBITDA riclassificato a € {ebitda:,.0f} (Margine operativo {ebitda/revenue*100:.1f}%), posizionato nel quartile superiore del distretto industriale."
-            })
-            evidences.append({
-                "category": "FACT",
-                "source": f"{filename} (CEE Stato Patrimoniale Passivo Voce A)",
-                "metric": "Patrimonio Netto a Garanzia",
-                "value": f"€ {net_equity:,.0f}",
-                "claim": f"Patrimonio Netto primario a presidio del rischio di credito pari a € {net_equity:,.0f} (Grado di patrimonializzazione al {net_equity/total_assets*100:.1f}%)."
-            })
-            evidences.append({
-                "category": "CALCULATION",
-                "source": "Analisi di Tesoreria FinSight (Voce C.IV / D.4)",
-                "metric": "Posizione Finanziaria Netta (PFN)",
-                "value": f"€ {total_debt - cash_and_equivalents:,.0f}",
-                "claim": f"Posizione Finanziaria Netta pre-operazione pari a € {total_debt - cash_and_equivalents:,.0f}, con liquidità pronta cassa a € {cash_and_equivalents:,.0f}."
-            })
-            evidences.append({
-                "category": "CALCULATION",
-                "source": "FinSight Liquidity Matrix",
-                "metric": "Quick Liquidity Ratio",
-                "value": f"{cash_and_equivalents / short_term_debt:.2f}x",
-                "claim": f"Rapporto di liquidità primaria pari a {cash_and_equivalents / short_term_debt:.2f}x rispetto ai debiti bancari a breve ({short_term_debt:,.0f} €), garantendo piena copertura delle scadenze."
-            })
-
-        else:
-            # Flat Summary Format
-            fiscal_year = int(df.get("fiscal_year", [datetime.datetime.now().year - 1])[0])
-            revenue = float(df.get("revenue", df.get("fatturato", [14200000.0]))[0])
-            ebitda = float(df.get("ebitda", df.get("margine_operativo_lordo", [revenue * 0.174]))[0])
-            net_income = float(df.get("net_income", df.get("utile_netto", [ebitda * 0.45]))[0])
-            total_assets = float(df.get("total_assets", df.get("totale_attivo", [revenue * 1.1]))[0])
-            net_equity = float(df.get("net_equity", df.get("patrimonio_netto", [total_assets * 0.38]))[0])
-            total_debt = float(df.get("total_debt", df.get("totale_debiti", [total_assets * 0.30]))[0])
-            short_term_debt = float(df.get("short_term_debt", df.get("debiti_breve_termine", [total_debt * 0.25]))[0])
-            cash_and_equivalents = float(df.get("cash_and_equivalents", df.get("cassa_e_disponibilita", [revenue * 0.115]))[0])
-            capex = float(df.get("capex", df.get("investimenti_capex", [ebitda * 0.37]))[0])
-            rows_count = 1
-
-            evidences.append({
-                "category": "FACT",
-                "source": f"{filename} (Bilancio Aziendale)",
-                "metric": "Fatturato Complessivo",
-                "value": f"€ {revenue:,.0f}",
-                "claim": f"Fatturato validato a € {revenue:,.0f} con EBITDA pari a € {ebitda:,.0f}."
-            })
-            evidences.append({
-                "category": "CALCULATION",
-                "source": "FinSight Ingestion Engine",
-                "metric": "Posizione Finanziaria Netta",
-                "value": f"€ {total_debt - cash_and_equivalents:,.0f}",
-                "claim": f"Indebitamento netto pre-operazione attestato a € {total_debt - cash_and_equivalents:,.0f}."
-            })
+        net_debt = total_debt - cash_and_equivalents
+        evidences.append({
+            "category": "FACT",
+            "source": f"{filename} ({extract_source})",
+            "metric": "Fatturato Complessivo",
+            "value": f"€ {revenue:,.0f}",
+            "claim": f"Fatturato validato a € {revenue:,.0f} con EBITDA pari a € {ebitda:,.0f} da {rows_count} righe del file caricato.",
+        })
+        evidences.append({
+            "category": "CALCULATION",
+            "source": "FinSight Ingestion Engine",
+            "metric": "Posizione Finanziaria Netta",
+            "value": f"€ {net_debt:,.0f}",
+            "claim": f"Indebitamento netto pre-operazione attestato a € {net_debt:,.0f} (cassa € {cash_and_equivalents:,.0f}).",
+        })
+        evidences.append({
+            "category": "FACT",
+            "source": filename,
+            "metric": "Righe elaborate",
+            "value": str(rows_count),
+            "claim": f"SHA-256 {file_hash} — {rows_count} accounting rows ingested for {company_id}.",
+        })
 
         statement_id = f"FS_{company_id.upper()}_{fiscal_year}_{file_hash[:6]}"
-
-        # Upsert into DuckDB
-        con.execute("DELETE FROM financial_statements WHERE company_id = ? AND fiscal_year = ?", [company_id, fiscal_year])
+        con.execute("DELETE FROM financial_statements WHERE company_id = ?", [company_id])
         con.execute("""
         INSERT INTO financial_statements (
             statement_id, company_id, fiscal_year, revenue, ebitda, net_income,
@@ -355,7 +526,6 @@ def parse_and_ingest_csv(file_bytes: bytes, filename: str, company_id: str) -> D
             cash_and_equivalents, capex, filename, file_hash
         ])
 
-        # Store evidences into document_chunks for RAG Grounding
         for idx, ev in enumerate(evidences):
             chunk_id = f"EV_{company_id.upper()}_{file_hash[:4]}_{idx+1:02d}"
             meta = json.dumps({"source": ev["source"], "category": ev["category"], "metric": ev["metric"], "value": ev["value"]})
@@ -366,17 +536,20 @@ def parse_and_ingest_csv(file_bytes: bytes, filename: str, company_id: str) -> D
 
         return {
             "status": "SUCCESS",
-            "message": f"Successfully parsed and ingested '{filename}' into DuckDB. Verified {rows_count} accounting entries.",
+            "message": (
+                f"Parsed '{filename}' into DuckDB from {rows_count} rows "
+                f"(revenue €{revenue:,.0f}, EBITDA €{ebitda:,.0f})."
+            ),
             "statement_id": statement_id,
             "fiscal_year": fiscal_year,
             "revenue": revenue,
             "ebitda": ebitda,
-            "net_debt": total_debt - cash_and_equivalents,
+            "net_debt": net_debt,
             "net_equity": net_equity,
             "cash_and_equivalents": cash_and_equivalents,
             "file_hash": file_hash,
             "rows_ingested": rows_count,
-            "evidences": evidences
+            "evidences": evidences,
         }
 
     except Exception as exc:
@@ -503,7 +676,7 @@ def calculate_deterministic_bankability(
                short_term_debt, cash_and_equivalents, capex, fiscal_year
         FROM financial_statements
         WHERE company_id = ?
-        ORDER BY fiscal_year DESC
+        ORDER BY ingested_at DESC, fiscal_year DESC
         LIMIT 1
     """, [company_id]).fetchone()
 
