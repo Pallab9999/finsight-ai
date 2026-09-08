@@ -14,6 +14,7 @@ class AgentState(TypedDict, total=False):
     query: str
     scenario_loan_amount: int | None
     loan_amount: int | None
+    company_id: str | None
     result: EvaluateResponse
 
 
@@ -22,6 +23,7 @@ def _run_pipeline(state: AgentState) -> AgentState:
         state["query"],
         state.get("scenario_loan_amount"),
         state.get("loan_amount"),
+        state.get("company_id"),
     )
     return {"result": result}
 
@@ -38,6 +40,7 @@ def evaluate_with_graph(
     query: str,
     scenario_loan_amount: int | None = None,
     loan_amount: int | None = None,
+    company_id: str | None = None,
 ) -> EvaluateResponse:
     app = build_graph()
     final = app.invoke(
@@ -45,6 +48,7 @@ def evaluate_with_graph(
             "query": query,
             "scenario_loan_amount": scenario_loan_amount,
             "loan_amount": loan_amount,
+            "company_id": company_id,
         }
     )
     return final["result"]

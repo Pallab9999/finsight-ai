@@ -40,15 +40,24 @@ def _summarize_with_bedrock(prompt: str) -> str | None:
         return None
 
 
+def _gemini_api_key() -> str:
+    return (
+        settings.gemini_api_key
+        or os.getenv("GEMINI_API_KEY", "")
+        or os.getenv("GOOGLE_API_KEY", "")
+    )
+
+
 def _summarize_with_gemini(prompt: str) -> str | None:
-    if not settings.gemini_api_key:
+    api_key = _gemini_api_key()
+    if not api_key:
         return None
     try:
         from langchain_google_genai import ChatGoogleGenerativeAI
 
         llm = ChatGoogleGenerativeAI(
             model=settings.gemini_model,
-            google_api_key=settings.gemini_api_key,
+            google_api_key=api_key,
             temperature=0.2,
         )
         content = llm.invoke(prompt).content

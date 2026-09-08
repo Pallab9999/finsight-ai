@@ -27,6 +27,8 @@ data/raw/*
 data/processed/*
 !data/raw/.gitkeep
 !data/processed/.gitkeep
+app_backup/
+_upstream_app/
 
 # OS / editor
 .DS_Store

@@ -36,6 +36,7 @@ def evaluate(request: EvaluateRequest) -> EvaluateResponse:
             request.query,
             request.scenario_loan_amount,
             request.loan_amount,
+            request.company_id,
         )
     except Exception as exc:
         logger.exception("Evaluation failed")

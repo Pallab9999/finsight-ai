@@ -28,7 +28,7 @@ from backend.tools import (
     search_documents,
 )
 from ingestion.cleaner import standardize_province, standardize_sector
-from ingestion.loaders import get_connection, seed_database
+from ingestion.loaders import get_connection, seed_database, ensure_sme_profiles
 
 logger = logging.getLogger(__name__)
 
@@ -36,11 +36,13 @@ AUDIT_TRAIL: list[str] = []
 
 
 def _ensure_database() -> None:
-    if not settings.duckdb_path.exists():
-        bankbench = settings.bankbench_sqlite_path or None
-        from pathlib import Path
+    bankbench = settings.bankbench_sqlite_path or None
+    from pathlib import Path
 
+    if not settings.duckdb_path.exists():
         seed_database(settings.duckdb_path, Path(bankbench) if bankbench else None)
+    else:
+        ensure_sme_profiles(settings.duckdb_path)
 
 
 def parse_query(query: str) -> dict[str, Any]:
@@ -49,18 +51,32 @@ def parse_query(query: str) -> dict[str, Any]:
     q_lower = q.lower()
 
     company = "EcoTex Milano"
-    if match := re.search(r"for\s+([A-Za-z0-9\s&\-\.]+?)(?:,|\s+a\s|\s+in\s|$)", q, re.I):
+    if "meccanica" in q_lower or "varese" in q_lower:
+        company = "Meccanica Precisione Varese"
+    elif "agrobio" in q_lower or "brianza" in q_lower:
+        company = "AgroBio Brianza"
+    elif "ecotex" in q_lower:
+        company = "EcoTex Milano"
+    elif match := re.search(r"for\s+([A-Za-z0-9\s&\-\.]+?)(?:,|\s+a\s|\s+in\s|$)", q, re.I):
         company = match.group(1).strip().rstrip(",")
 
     province = "Milano"
     if "milan" in q_lower or "milano" in q_lower:
         province = "Milano"
+    elif "varese" in q_lower:
+        province = "Varese"
+    elif "brianza" in q_lower or "monza" in q_lower:
+        province = "Monza e Brianza"
     elif match := re.search(r"\bin\s+([A-Za-z\s]+?)(?:\.|$|,)", q, re.I):
         province = standardize_province(match.group(1).strip())
 
     sector = "Textile Manufacturing"
     if "textile" in q_lower:
         sector = "Textile Manufacturing"
+    elif "cnc" in q_lower or "aerospace" in q_lower or "machin" in q_lower:
+        sector = "Precision Machining"
+    elif "agri" in q_lower or "pack" in q_lower or "organic" in q_lower:
+        sector = "Agri-Food"
     elif "manufactur" in q_lower:
         sector = "Manufacturing"
 
@@ -169,10 +185,18 @@ Rules: Be direct. Do not invent numbers. Label as decision-support, not advice."
     )
 
 
+COMPANY_BY_ID = {
+    "ecotex": "EcoTex Milano",
+    "meccanica": "Meccanica Precisione Varese",
+    "agrobio": "AgroBio Brianza",
+}
+
+
 def evaluate_request(
     query: str,
     scenario_loan_amount: int | None = None,
     loan_amount_override: int | None = None,
+    company_id: str | None = None,
 ) -> EvaluateResponse:
     """Full evaluation pipeline."""
     global AUDIT_TRAIL
@@ -180,6 +204,8 @@ def evaluate_request(
 
     _ensure_database()
     parsed = parse_query(query)
+    if company_id and company_id in COMPANY_BY_ID:
+        parsed["company"] = COMPANY_BY_ID[company_id]
     company = parsed["company"]
     loan_amount = loan_amount_override or parsed["loan_amount"]
     parsed["loan_amount"] = loan_amount

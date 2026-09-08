@@ -7,8 +7,9 @@ from pydantic import BaseModel, Field
 
 class EvaluateRequest(BaseModel):
     query: str = Field(..., min_length=3)
-    loan_amount: int | None = Field(default=None, ge=100_000, le=5_000_000)
-    scenario_loan_amount: int | None = Field(default=None, ge=100_000, le=5_000_000)
+    company_id: str | None = None
+    loan_amount: int | None = Field(default=None, ge=10_000, le=100_000_000)
+    scenario_loan_amount: int | None = Field(default=None, ge=10_000, le=100_000_000)
 
 
 class EvidenceItem(BaseModel):

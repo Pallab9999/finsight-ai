@@ -8,6 +8,8 @@ PROVINCE_ALIASES = {
     "brescia": "Brescia",
     "monza": "Monza e Brianza",
     "monza e brianza": "Monza e Brianza",
+    "brianza": "Monza e Brianza",
+    "varese": "Varese",
 }
 
 SECTOR_ALIASES = {
@@ -16,6 +18,9 @@ SECTOR_ALIASES = {
     "manufacturing": "Manufacturing",
     "commercio": "Retail Trade",
     "retail": "Retail Trade",
+    "precision machining": "Precision Machining",
+    "agri-food": "Agri-Food",
+    "agri food": "Agri-Food",
 }
 
 

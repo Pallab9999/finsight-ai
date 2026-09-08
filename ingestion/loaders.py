@@ -27,6 +27,36 @@ ECOTEX_FINANCIALS = {
     "revenue_growth": 0.082,
 }
 
+MECCANICA_FINANCIALS = {
+    "company_id": "meccanica-001",
+    "company_name": "Meccanica Precisione Varese",
+    "province": "Varese",
+    "sector": "Precision Machining",
+    "revenue": 9_800_000.0,
+    "ebitda": 1_420_000.0,
+    "cash": 950_000.0,
+    "short_term_debt": 1_200_000.0,
+    "long_term_debt": 2_600_000.0,
+    "interest_expense": 110_000.0,
+    "employees": 42,
+    "revenue_growth": 0.054,
+}
+
+AGROBIO_FINANCIALS = {
+    "company_id": "agrobio-001",
+    "company_name": "AgroBio Brianza",
+    "province": "Monza e Brianza",
+    "sector": "Agri-Food",
+    "revenue": 6_400_000.0,
+    "ebitda": 880_000.0,
+    "cash": 720_000.0,
+    "short_term_debt": 800_000.0,
+    "long_term_debt": 1_600_000.0,
+    "interest_expense": 72_000.0,
+    "employees": 28,
+    "revenue_growth": 0.061,
+}
+
 ECOTEX_ESG = {
     "company_id": "ecotex-001",
     "company_name": "EcoTex Milano",
@@ -54,6 +84,20 @@ SYNTHETIC_REGIONAL = [
         "avg_interest_rate": 0.048,
         "loan_default_rate": 0.022,
     },
+    {
+        "province": "Varese",
+        "year": 2024,
+        "liquidity_indicator": 0.70,
+        "avg_interest_rate": 0.049,
+        "loan_default_rate": 0.0225,
+    },
+    {
+        "province": "Monza e Brianza",
+        "year": 2024,
+        "liquidity_indicator": 0.74,
+        "avg_interest_rate": 0.047,
+        "loan_default_rate": 0.0198,
+    },
 ]
 
 SYNTHETIC_SECTOR = [
@@ -65,15 +109,31 @@ SYNTHETIC_SECTOR = [
         "active_enterprises": 1240,
         "economic_performance_index": 1.06,
     },
-    {
-        "province": "Milano",
-        "sector_name": "Manufacturing",
-        "year": 2024,
-        "aggregate_turnover": 45_000_000_000.0,
-        "active_enterprises": 18500,
-        "economic_performance_index": 1.03,
-    },
-]
+        {
+            "province": "Milano",
+            "sector_name": "Manufacturing",
+            "year": 2024,
+            "aggregate_turnover": 45_000_000_000.0,
+            "active_enterprises": 18500,
+            "economic_performance_index": 1.03,
+        },
+        {
+            "province": "Varese",
+            "sector_name": "Precision Machining",
+            "year": 2024,
+            "aggregate_turnover": 3_100_000_000.0,
+            "active_enterprises": 860,
+            "economic_performance_index": 1.04,
+        },
+        {
+            "province": "Monza e Brianza",
+            "sector_name": "Agri-Food",
+            "year": 2024,
+            "aggregate_turnover": 1_850_000_000.0,
+            "active_enterprises": 540,
+            "economic_performance_index": 1.05,
+        },
+    ]
 
 ESG_DOCUMENT_CHUNKS = [
     {
@@ -216,6 +276,14 @@ def seed_database(
             "INSERT INTO company_financials VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             list(ECOTEX_FINANCIALS.values()),
         )
+        conn.execute(
+            "INSERT INTO company_financials VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            list(MECCANICA_FINANCIALS.values()),
+        )
+        conn.execute(
+            "INSERT INTO company_financials VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            list(AGROBIO_FINANCIALS.values()),
+        )
 
         for row in SYNTHETIC_REGIONAL:
             conn.execute(
@@ -259,6 +327,55 @@ def seed_database(
                 "INSERT INTO documents VALUES (?, ?, ?, ?, ?, ?, ?)",
                 list(doc.values()),
             )
+    finally:
+        conn.close()
+
+
+def ensure_sme_profiles(duckdb_path: Path) -> None:
+    """Insert the extra SME rows if an older EcoTex-only database is already on disk."""
+    conn = duckdb.connect(str(duckdb_path))
+    try:
+        create_duckdb_schema(conn)
+        existing = {
+            row[0]
+            for row in conn.execute("SELECT company_name FROM company_financials").fetchall()
+        }
+        for profile in (MECCANICA_FINANCIALS, AGROBIO_FINANCIALS):
+            if profile["company_name"] not in existing:
+                conn.execute(
+                    "INSERT INTO company_financials VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    list(profile.values()),
+                )
+        for row in SYNTHETIC_REGIONAL:
+            found = conn.execute(
+                "SELECT 1 FROM regional_risk WHERE province = ? LIMIT 1",
+                [row["province"]],
+            ).fetchone()
+            if not found:
+                conn.execute(
+                    "INSERT INTO regional_risk VALUES (?, ?, ?, ?, ?)",
+                    list(row.values()),
+                )
+        for row in SYNTHETIC_SECTOR:
+            found = conn.execute(
+                """
+                SELECT 1 FROM sector_performance
+                WHERE province = ? AND sector_name = ? LIMIT 1
+                """,
+                [row["province"], row["sector_name"]],
+            ).fetchone()
+            if not found:
+                conn.execute(
+                    "INSERT INTO sector_performance VALUES (?, ?, ?, ?, ?, ?)",
+                    [
+                        row["province"],
+                        row["sector_name"],
+                        row["year"],
+                        row["aggregate_turnover"],
+                        row["active_enterprises"],
+                        row["economic_performance_index"],
+                    ],
+                )
     finally:
         conn.close()
 
