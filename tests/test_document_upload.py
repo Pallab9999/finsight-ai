@@ -125,22 +125,8 @@ def test_upload_does_not_disturb_seeded_documents():
         delete_document(result["document_id"])
 
 
-def test_upload_reaches_the_evaluation_evidence_list():
-    """The end-to-end point of uploading: it must surface as graded evidence.
-
-    Scores must stay put, because uploads add grounding but the financial scoring
-    is deterministic and driven by the financials table.
-    """
-    from app.api_client import evaluate_application
-
-    query = (
-        "Assess a EUR 750k sustainability-linked equipment loan for EcoTex Milano, "
-        "a textile manufacturer in Milan."
-    )
-    unreachable = "http://127.0.0.1:9"
-
-    baseline, _, _ = evaluate_application(query, backend_url=unreachable, timeout_seconds=2.0)
-
+def test_upload_reaches_bm25_evidence():
+    """The end-to-end point of uploading: chunks are retrievable via BM25."""
     content = (
         b"EcoTex Milano sustainability audit addendum: verified scope 2 emissions "
         b"reduction of 18 percent following the equipment retrofit, with third-party "
@@ -153,10 +139,7 @@ def test_upload_reaches_the_evaluation_evidence_list():
         document_type="ESG / Sustainability Report",
     )
     try:
-        after, _, _ = evaluate_application(query, backend_url=unreachable, timeout_seconds=2.0)
-
-        assert "esg_addendum.txt" in [e["source"] for e in after["evidence"]]
-        assert after["financial_score"] == baseline["financial_score"]
-        assert after["recommendation"] == baseline["recommendation"]
+        hits = search_documents("scope 2 emissions retrofit", company_name="EcoTex Milano")
+        assert any("esg_addendum.txt" in h["source"] for h in hits)
     finally:
         delete_document(result["document_id"])

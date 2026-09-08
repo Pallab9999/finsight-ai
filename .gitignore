@@ -31,3 +31,4 @@ data/processed/*
 # OS / editor
 .DS_Store
 Thumbs.db
+~$*
