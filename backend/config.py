@@ -1,6 +1,7 @@
 """Application configuration."""
 
 from pathlib import Path
+import os
 
 from dotenv import load_dotenv
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -32,6 +33,7 @@ class Settings(BaseSettings):
     # SESSION_TOKEN) by boto3 itself, so they are never held in this object.
     bedrock_enabled: bool = False
     bedrock_model_id: str = "anthropic.claude-3-5-sonnet-20241022-v2:0"
+    bedrock_stt_model_id: str = "amazon.nova-lite-v1:0"
     bedrock_region: str = "us-east-1"
 
     api_url: str = "http://localhost:8000"
@@ -42,3 +44,8 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+def gemini_key() -> str:
+    """Gemini key from settings or GOOGLE_API_KEY. Never log the value."""
+    return settings.gemini_api_key or os.getenv("GOOGLE_API_KEY", "")

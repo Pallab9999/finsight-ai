@@ -21,7 +21,7 @@ import re
 
 import duckdb
 
-from backend.config import settings
+from backend.config import gemini_key, settings
 from ingestion.loaders import create_duckdb_schema, get_connection
 
 logger = logging.getLogger(__name__)
@@ -122,10 +122,10 @@ def guard_sql(sql: str, max_rows: int = MAX_ROWS) -> str:
 
 def generate_sql(question: str) -> tuple[str | None, str]:
     """Ask Gemini for SQL. Returns (sql, status)."""
-    if not settings.gemini_api_key:
+    if not gemini_key():
         return None, (
             "Natural-language analytics needs a Gemini API key. Set GEMINI_API_KEY "
-            "in .env (or in Streamlit secrets when hosted), then reload."
+            "or GOOGLE_API_KEY in .env (or in Streamlit secrets when hosted), then reload."
         )
 
     prompt = PROMPT_TEMPLATE.format(
@@ -135,7 +135,7 @@ def generate_sql(question: str) -> tuple[str | None, str]:
     try:
         from google import genai
 
-        client = genai.Client(api_key=settings.gemini_api_key)
+        client = genai.Client(api_key=gemini_key())
         response = client.models.generate_content(
             model=settings.gemini_model,
             contents=prompt,

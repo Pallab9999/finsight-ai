@@ -1,4 +1,4 @@
-"""
+﻿"""
 FinSight AI - Backend Integration Client & Antifragile Fallback Protocol
 ========================================================================
 Handles HTTP communication between the Streamlit UI and the FastAPI backend endpoints:
@@ -14,6 +14,7 @@ preventing any UI crash and ensuring seamless hackathon demo continuity.
 """
 
 import io
+import re
 import requests
 from typing import Dict, Any, Tuple, Optional
 from app.mock_data import get_base_demo_payload, calculate_scenario
@@ -25,6 +26,40 @@ from app.duckdb_engine import (
 )
 
 DEFAULT_BACKEND_URL = "http://localhost:8000"
+
+_COMPANY_ALIASES = (
+    ("meccanica", "meccanica"),
+    ("varese", "meccanica"),
+    ("agrobio", "agrobio"),
+    ("brianza", "agrobio"),
+    ("ecotex", "ecotex"),
+)
+
+
+def parse_query_fields(query: str) -> Tuple[Optional[str], Optional[int]]:
+    """Extract company_id and loan amount from a free-text prompt when present."""
+    text = query or ""
+    lowered = text.lower()
+    company_id = None
+    for needle, mapped in _COMPANY_ALIASES:
+        if needle in lowered:
+            company_id = mapped
+            break
+
+    amount = None
+    if match := re.search(r"(?:€|eur|euro)?\s*([\d.,]+)\s*[kK]\b", text):
+        amount = int(float(match.group(1).replace(",", ".")) * 1000)
+    elif match := re.search(r"(?:€|eur|euro)\s*([\d.,]+)", text, re.I):
+        raw = match.group(1).replace(",", "")
+        try:
+            val = float(raw)
+        except ValueError:
+            val = 0
+        if 0 < val < 10_000:
+            val *= 1000
+        if val >= 10_000:
+            amount = int(val)
+    return company_id, amount
 
 
 def authenticate_api(
@@ -125,6 +160,10 @@ def evaluate_application(
     Evaluates an SME financing application via FastAPI /evaluate or local DuckDB scoring engine.
     Returns: (payload, mode, status_message)
     """
+    _, parsed_amt = parse_query_fields(query)
+    if parsed_amt:
+        loan_amount = parsed_amt
+
     if force_mock:
         try:
             payload = calculate_deterministic_bankability(

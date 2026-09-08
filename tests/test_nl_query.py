@@ -99,7 +99,7 @@ def test_run_nl_query_needs_a_question():
 
 def test_run_nl_query_reports_missing_key_instead_of_guessing(monkeypatch):
     """Without a key this feature must say so, not fabricate an answer."""
-    monkeypatch.setattr("analytics.nl_query.settings.gemini_api_key", "")
+    monkeypatch.setattr("analytics.nl_query.gemini_key", lambda: "")
 
     result = run_nl_query("What is EcoTex revenue?")
 

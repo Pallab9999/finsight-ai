@@ -44,9 +44,12 @@ from app.api_client import (
     simulate_scenario_api,
     upload_file_api,
     authenticate_api,
+    parse_query_fields,
     DEFAULT_BACKEND_URL
 )
 from app.pdf_generator import generate_credit_memorandum_pdf
+from backend.speech import mime_for, stt_available, transcribe
+from analytics.nl_query import run_nl_query
 
 # ==========================================
 # PAGE CONFIGURATION & THEME
@@ -240,7 +243,7 @@ st.markdown("""
         gap: 0.4rem;
     }
 
-    /* Holographic Certainty Banner */
+    /* Holographic Certainty Banner (bank underwriter only) */
     .certainty-banner {
         background: linear-gradient(135deg, rgba(6, 78, 59, 0.35) 0%, rgba(15, 23, 42, 0.85) 50%, rgba(12, 74, 110, 0.35) 100%);
         backdrop-filter: blur(20px);
@@ -252,6 +255,18 @@ st.markdown("""
         justify-content: space-between;
         align-items: center;
         box-shadow: inset 0 1px 0 0 rgba(52, 211, 153, 0.3), 0 12px 36px -10px rgba(16, 185, 129, 0.22);
+    }
+    .origination-banner {
+        background: linear-gradient(135deg, rgba(12, 74, 110, 0.35) 0%, rgba(15, 23, 42, 0.85) 55%, rgba(30, 41, 59, 0.6) 100%);
+        backdrop-filter: blur(20px);
+        border: 1px solid rgba(56, 189, 248, 0.35);
+        border-radius: 14px;
+        padding: 1.15rem 1.45rem;
+        margin-bottom: 1.35rem;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        box-shadow: inset 0 1px 0 0 rgba(56, 189, 248, 0.25), 0 12px 36px -10px rgba(14, 165, 233, 0.18);
     }
 
     /* Modern Metric Tiles */
@@ -514,6 +529,40 @@ def create_gauge(value: int, title: str, benchmark: int, color_theme: str = "blu
     return fig
 
 
+def apply_voice_prompt(recorded, fingerprint_key: str, target_key: str, auto_evaluate: bool = False) -> None:
+    """Transcribe a Streamlit audio_input recording into a text prompt.
+
+    The transcript is staged on a non-widget key so the next rerun can load it
+    into the text field before that widget is instantiated.
+    """
+    if recorded is None or not stt_available():
+        return
+    audio_bytes = recorded.getvalue()
+    fingerprint = hashlib.sha256(audio_bytes).hexdigest()[:16]
+    if st.session_state.get(fingerprint_key) == fingerprint:
+        return
+    with st.spinner("Transcribing voice prompt..."):
+        transcript, status = transcribe(
+            audio_bytes,
+            mime_type=mime_for(getattr(recorded, "name", "audio.wav")),
+        )
+    st.session_state[fingerprint_key] = fingerprint
+    st.session_state["voice_status"] = status
+    if transcript:
+        st.session_state["_pending_voice_prompt"] = transcript
+        st.session_state["_pending_voice_target"] = target_key
+        if auto_evaluate:
+            st.session_state["pending_eval"] = True
+        st.rerun()
+
+
+def flush_pending_voice_prompt() -> None:
+    pending = st.session_state.pop("_pending_voice_prompt", None)
+    target = st.session_state.pop("_pending_voice_target", None)
+    if pending and target:
+        st.session_state[target] = pending
+
+
 # ==========================================
 # UX/UI HELPER: COVENANT HEADROOM GAUGE BAR
 # ==========================================
@@ -536,48 +585,55 @@ def render_covenant_headroom_bar(dscr_val: float, covenant_floor: float = 1.30, 
     if dscr_val >= covenant_floor:
         status_color = "#34d399"
         status_badge = "badge-safe"
-        status_txt = f"Buffer Solvibilità: <b>+{headroom:.2f}x</b> | Resiste a shock EBITDA fino a <b>-{shock_tolerance:.1f}%</b> prima del breach del covenant."
+        status_label = "COVENANT CLEARED"
+        status_txt = (
+            f"Solvency buffer: <b>+{headroom:.2f}x</b> · Survives an EBITDA shock of "
+            f"<b>-{shock_tolerance:.1f}%</b> before covenant breach."
+        )
     elif dscr_val >= eba_floor:
         status_color = "#fbbf24"
         status_badge = "badge-watch"
-        status_txt = f"Area di Monitoraggio EBA ({headroom:.2f}x rispetto a soglia 1.30x). Nessun margine per cali di fatturato."
+        status_label = "WATCHLIST"
+        status_txt = (
+            f"EBA watchlist ({headroom:.2f}x vs 1.30x floor). No room for a revenue drop."
+        )
     else:
         status_color = "#fb7185"
         status_badge = "badge-danger"
-        status_txt = "Deficit di Copertura: Flussi di cassa storici insufficienti a servire la nuova linea."
+        status_label = "BREACH"
+        status_txt = "Coverage deficit: historical cash flow cannot service the new facility."
 
-    return f"""
-    <div style="margin: 0.6rem 0 1.25rem 0; background: rgba(13, 19, 32, 0.85); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 10px; padding: 0.85rem 1.15rem;">
-        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.45rem; flex-wrap: wrap; gap: 0.5rem;">
-            <div style="display: flex; align-items: center; gap: 0.5rem;">
-                <span style="font-size: 0.72rem; color: #94a3b8; text-transform: uppercase; font-weight: 700; letter-spacing: 0.04em;">
-                    Covenant Headroom & Shock Capacity (EBA Floor: 1.00x · Min Covenant: 1.30x)
-                </span>
-                <span class="finsight-badge {status_badge}" style="font-size: 0.65rem; padding: 0.15rem 0.5rem;">
-                    {'COVENANT CLEARED' if dscr_val >= covenant_floor else ('WATCHLIST' if dscr_val >= eba_floor else 'BREACH')}
-                </span>
-            </div>
-            <span style="font-family: 'JetBrains Mono', monospace; font-size: 0.95rem; font-weight: 800; color: {status_color};">
-                DSCR: {dscr_val:.2f}x
-            </span>
-        </div>
-        
-        <div style="position: relative; height: 10px; border-radius: 5px; background: rgba(255, 255, 255, 0.06); overflow: hidden; margin-bottom: 0.45rem;">
-            <div style="position: absolute; left: 0; width: {eba_pct:.1f}%; height: 100%; background: rgba(244, 63, 94, 0.35);" title="Zona Critica (&lt; 1.00x)"></div>
-            <div style="position: absolute; left: {eba_pct:.1f}%; width: {cov_pct - eba_pct:.1f}%; height: 100%; background: rgba(245, 158, 11, 0.35);" title="Watchlist EBA (1.00x - 1.30x)"></div>
-            <div style="position: absolute; left: {cov_pct:.1f}%; right: 0; height: 100%; background: rgba(16, 185, 129, 0.35);" title="Solvibile (&gt; 1.30x)"></div>
-            <!-- Progress indicator -->
-            <div style="position: absolute; left: 0; width: {pct:.1f}%; height: 100%; background: linear-gradient(90deg, rgba(56, 189, 248, 0.4), {status_color});"></div>
-            <!-- Covenant Line Marker -->
-            <div style="position: absolute; left: {cov_pct:.1f}%; top: 0; bottom: 0; width: 2px; background: #ffffff; z-index: 2;" title="Soglia Minima 1.30x"></div>
-        </div>
-        
-        <div style="display: flex; justify-content: space-between; font-size: 0.73rem; color: #94a3b8; flex-wrap: wrap; gap: 0.3rem;">
-            <span><span style="color: {status_color}; font-weight: 700;">●</span> {status_txt}</span>
-            <span style="font-family: 'JetBrains Mono', monospace; color: #64748b;">Scala Lineare: 0.0x → 4.0x</span>
-        </div>
-    </div>
-    """
+    # Streamlit markdown treats any 4-space-indented line as a fenced code block.
+    # Flatten every line so the bar renders as HTML, not as source.
+    html = f"""
+<div style="margin: 0.6rem 0 1.25rem 0; background: rgba(13, 19, 32, 0.85); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 10px; padding: 0.85rem 1.15rem;">
+<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.45rem; flex-wrap: wrap; gap: 0.5rem;">
+<div style="display: flex; align-items: center; gap: 0.5rem;">
+<span style="font-size: 0.72rem; color: #94a3b8; text-transform: uppercase; font-weight: 700; letter-spacing: 0.04em;">
+Covenant Headroom &amp; Shock Capacity (EBA Floor: 1.00x · Min Covenant: 1.30x)
+</span>
+<span class="finsight-badge {status_badge}" style="font-size: 0.65rem; padding: 0.15rem 0.5rem;">
+{status_label}
+</span>
+</div>
+<span style="font-family: 'JetBrains Mono', monospace; font-size: 0.95rem; font-weight: 800; color: {status_color};">
+DSCR: {dscr_val:.2f}x
+</span>
+</div>
+<div style="position: relative; height: 10px; border-radius: 5px; background: rgba(255, 255, 255, 0.06); overflow: hidden; margin-bottom: 0.45rem;">
+<div style="position: absolute; left: 0; width: {eba_pct:.1f}%; height: 100%; background: rgba(244, 63, 94, 0.35);" title="Critical zone (&lt; 1.00x)"></div>
+<div style="position: absolute; left: {eba_pct:.1f}%; width: {cov_pct - eba_pct:.1f}%; height: 100%; background: rgba(245, 158, 11, 0.35);" title="EBA watchlist (1.00x - 1.30x)"></div>
+<div style="position: absolute; left: {cov_pct:.1f}%; right: 0; height: 100%; background: rgba(16, 185, 129, 0.35);" title="Solvent (&gt; 1.30x)"></div>
+<div style="position: absolute; left: 0; width: {pct:.1f}%; height: 100%; background: linear-gradient(90deg, rgba(56, 189, 248, 0.4), {status_color});"></div>
+<div style="position: absolute; left: {cov_pct:.1f}%; top: 0; bottom: 0; width: 2px; background: #ffffff; z-index: 2;" title="Minimum covenant 1.30x"></div>
+</div>
+<div style="display: flex; justify-content: space-between; font-size: 0.73rem; color: #94a3b8; flex-wrap: wrap; gap: 0.3rem;">
+<span><span style="color: {status_color}; font-weight: 700;">●</span> {status_txt}</span>
+<span style="font-family: 'JetBrains Mono', monospace; color: #64748b;">Linear scale: 0.0x → 4.0x</span>
+</div>
+</div>
+"""
+    return html.strip()
 
 
 # ==========================================
@@ -814,55 +870,101 @@ def render_bank_stress_heatmap(ebitda: float, loan_amt: float, base_rate: float,
 # 0. AUTHENTICATION GATE (BANK VS SME LINKED THROUGH ID)
 # ==========================================
 if not st.session_state.get("authenticated", False):
-    st.markdown("""
-    <div style="text-align: center; max-width: 860px; margin: 2.5rem auto 1.8rem auto;">
-        <div style="display: inline-flex; align-items: center; margin-bottom: 0.75rem;">
-            <span class="finsight-badge badge-primary">
-                <span class="radar-beacon"></span> DUCKDB IN-MEMORY OLAP ENGINE // LATENCY &lt;4ms
-            </span>
-            <span class="finsight-badge badge-success">EBA/GL/2020/06 COMPLIANT</span>
-        </div>
-        <h1 style="margin: 0; font-size: 3.2rem; font-weight: 800; letter-spacing: -0.035em; background: linear-gradient(135deg, #ffffff 30%, #94a3b8 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent;">
-            FinSight AI
-        </h1>
-        <p style="font-size: 1.15rem; color: #94a3b8; margin-top: 0.35rem; font-weight: 400;">
-            Autonomous SME Credit Readiness, Statutory CEE Lakehouse & Capital Sizing Copilot
-        </p>
-        <div style="margin-top: 0.75rem; display: flex; justify-content: center; gap: 0.5rem; flex-wrap: wrap;">
-            <span class="finsight-badge badge-primary">DuckDB 1.0 OLAP</span>
-            <span class="finsight-badge badge-success">Banca d'Italia NPL Fuse</span>
-            <span class="finsight-badge badge-purple">EBA Loan Origination Certified</span>
-            <span class="finsight-badge badge-warning">TUB Art. 128-sexies Seal</span>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
-
-    auth_col1, auth_col2, auth_col3 = st.columns([0.7, 2.6, 0.7])
+    auth_col1, auth_col2, auth_col3 = st.columns([0.55, 2.9, 0.55])
     with auth_col2:
         st.markdown("""
-        <div class="exec-card" style="border-color: rgba(56, 189, 248, 0.35); position: relative; overflow: hidden;">
-            <div style="position: absolute; top: 0; left: 0; right: 0; height: 3px; background: linear-gradient(90deg, #38bdf8, #818cf8, #34d399);"></div>
-            <div class="exec-card-title">Dual-Entity Secure Access (Linked via Application ID)</div>
+        <div style="text-align: center; margin-bottom: 0.85rem;">
+            <span style="font-size: 1.35rem; font-weight: 800; color: #f8fafc; letter-spacing: -0.03em;">FinSight AI</span>
+            <span class="finsight-badge badge-primary" style="margin-left: 0.5rem;">Linked Application ID</span>
+        </div>
         """, unsafe_allow_html=True)
-
         selected_role_label = st.radio(
-            "Select Workspace Role:",
+            "Select workspace:",
             options=["🏢 SME Borrower (CFO)", "🏦 Bank Credit Officer (Underwriter)"],
-            horizontal=True
+            horizontal=True,
+            key="login_role_radio",
         )
-        is_bank = "Bank" in selected_role_label
-        role_key = "bank_officer" if is_bank else "sme_borrower"
+        is_bank_login = "Bank" in selected_role_label
+        role_key = "bank_officer" if is_bank_login else "sme_borrower"
 
-        default_email = "underwriter@intesabancapmi.it" if is_bank else "cfo@ecotex.it"
-        default_pwd = "bank2026" if is_bank else "cfo2026"
+        if is_bank_login:
+            st.markdown("""
+            <div style="text-align: center; margin: 0.4rem 0 1.1rem 0;">
+                <span class="finsight-badge badge-purple">INTESA SANPAOLO — DIREZIONE CREDITI CORPORATE PMI</span>
+                <span class="finsight-badge badge-success">EBA/GL/2020/06 UNDERWRITING DESK</span>
+                <h1 style="margin: 0.55rem 0 0.2rem 0; font-size: 2.45rem; font-weight: 800; letter-spacing: -0.035em; color: #f8fafc;">
+                    Bank Credit Desk
+                </h1>
+                <p style="font-size: 1.02rem; color: #c4b5fd; margin: 0;">
+                    Delibera workspace — linked application files, NPL overlays, covenant headroom
+                </p>
+            </div>
+            <div class="certainty-banner">
+                <div>
+                    <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.2rem;">
+                        <span style="font-size: 1.15rem;">🔒</span>
+                        <span style="font-size: 0.98rem; font-weight: 700; color: #ecfdf5;">
+                            Bank Acceptance Certainty: 94% Probability of Execution (Linked ID: ECOTEX-2026-IT)
+                        </span>
+                    </div>
+                    <div style="font-size: 0.78rem; color: #a7f3d0; line-height: 1.45;">
+                        Pre-audited against Banca d'Italia provincial NPL benchmarks and EBA loan origination rules.
+                        <b>Zero guessing. Zero black-box rejections.</b>
+                    </div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+            card_border = "rgba(168, 85, 247, 0.45)"
+            card_bar = "linear-gradient(90deg, #818cf8, #c084fc, #34d399)"
+            card_title = "Underwriter sign-in — credit committee workspace"
+            default_email = "underwriter@intesabancapmi.it"
+            default_pwd = "bank2026"
+        else:
+            st.markdown("""
+            <div style="text-align: center; margin: 0.4rem 0 1.1rem 0;">
+                <span class="finsight-badge badge-primary">SME ORIGINATION PORTAL</span>
+                <span class="finsight-badge badge-success">CREDIT-READY DOSSIER PACK</span>
+                <h1 style="margin: 0.55rem 0 0.2rem 0; font-size: 2.45rem; font-weight: 800; letter-spacing: -0.035em; color: #f8fafc;">
+                    Borrower Workspace
+                </h1>
+                <p style="font-size: 1.02rem; color: #7dd3fc; margin: 0;">
+                    Prepare and submit your facility request — bank acceptance is decided on the underwriter desk
+                </p>
+            </div>
+            <div class="origination-banner">
+                <div>
+                    <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.2rem;">
+                        <span style="font-size: 1.15rem;">📂</span>
+                        <span style="font-size: 0.98rem; font-weight: 700; color: #e0f2fe;">
+                            Application ECOTEX-2026-IT is in origination — awaiting bank delibera
+                        </span>
+                    </div>
+                    <div style="font-size: 0.78rem; color: #bae6fd; line-height: 1.45;">
+                        Package statutory CEE statements, ESG evidence, and the requested amount.
+                        Execution probability is visible only after the underwriter opens the linked file.
+                    </div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+            card_border = "rgba(56, 189, 248, 0.4)"
+            card_bar = "linear-gradient(90deg, #38bdf8, #34d399)"
+            card_title = "Borrower sign-in — origination portal"
+            default_email = "cfo@ecotex.it"
+            default_pwd = "cfo2026"
+
+        st.markdown(f"""
+        <div class="exec-card" style="border-color: {card_border}; position: relative; overflow: hidden;">
+            <div style="position: absolute; top: 0; left: 0; right: 0; height: 3px; background: {card_bar};"></div>
+            <div class="exec-card-title">{card_title}</div>
+        """, unsafe_allow_html=True)
 
         c_u1, c_u2 = st.columns([1.5, 1])
         with c_u1:
-            login_email = st.text_input("Enterprise Email:", value=default_email)
+            login_email = st.text_input("Enterprise Email:", value=default_email, key=f"login_email_{role_key}")
         with c_u2:
-            app_id_input = st.text_input("Application Reference ID:", value="ECOTEX-2026-IT")
+            app_id_input = st.text_input("Application Reference ID:", value="ECOTEX-2026-IT", key=f"login_app_{role_key}")
 
-        login_pwd = st.text_input("Password:", value=default_pwd, type="password")
+        login_pwd = st.text_input("Password:", value=default_pwd, type="password", key=f"login_pwd_{role_key}")
 
         if st.button("🔐 Sign In to Workspace", type="primary", width="stretch"):
             user, mode, msg = authenticate_api(login_email, login_pwd, role_key, force_mock=True)
@@ -934,6 +1036,12 @@ connection_mode = st.sidebar.radio(
 )
 backend_url = st.sidebar.text_input("FastAPI Endpoint:", value=DEFAULT_BACKEND_URL)
 use_force_mock = (connection_mode == "Deterministic Fallback (Demo Safe)")
+st.sidebar.markdown("---")
+st.sidebar.markdown("### Voice prompts")
+st.sidebar.caption(
+    "Use the **microphone next to Evaluate Now** (both SME and bank). "
+    "Speak any credit prompt — amounts and borrower names in the transcript are applied."
+)
 
 st.sidebar.markdown("---")
 
@@ -990,7 +1098,7 @@ with col_top1:
     st.markdown(f"""
     <div style="display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; margin-bottom: 0.35rem;">
         <div style="display: flex; align-items: center; gap: 0.5rem;">
-            <span style="font-size: 1.5rem;">🏦</span>
+            <span style="font-size: 1.5rem;">{'🏛️' if is_bank_user else '🏢'}</span>
             <h1 style="margin: 0; font-size: 1.95rem; font-weight: 800; color: #ffffff; letter-spacing: -0.035em;">
                 FinSight AI
             </h1>
@@ -1042,6 +1150,7 @@ with col_top2:
 # ==========================================
 tabs_list = [
     "🏦 Credit Dossier & Bankability",
+    "🎤 Voice Analytics",
     "📂 Dynamic Ingestion & DuckDB",
     "🧪 Capital Sizing & Stress Lab",
     "📑 Certified Dossier Export"
@@ -1051,16 +1160,18 @@ if is_bank_user:
 
 tab_instances = st.tabs(tabs_list)
 tab_dossier = tab_instances[0]
-tab_ingest = tab_instances[1]
-tab_stress = tab_instances[2]
-tab_export = tab_instances[3]
-tab_bank = tab_instances[4] if is_bank_user else None
+tab_voice = tab_instances[1]
+tab_ingest = tab_instances[2]
+tab_stress = tab_instances[3]
+tab_export = tab_instances[4]
+tab_bank = tab_instances[5] if is_bank_user else None
 
 
 # ==========================================
 # TAB 1: CREDIT DOSSIER & BANKABILITY SCORE
 # ==========================================
 with tab_dossier:
+    flush_pending_voice_prompt()
     company_default_amounts = {
         "ecotex": 750000,
         "meccanica": 500000,
@@ -1070,27 +1181,48 @@ with tab_dossier:
     base_data = calculate_deterministic_bankability(active_cid, current_req_amt)
     audit_hash = hashlib.sha256(f"{linked_app_id}_{base_data['company']}_{base_data['loan_amount']}_BDI".encode("utf-8")).hexdigest()[:16].upper()
 
-    # Hormozi Certainty Banner
-    st.markdown(f"""
-    <div class="certainty-banner">
-        <div>
-            <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.2rem;">
-                <span style="font-size: 1.15rem;">🔒</span>
-                <span style="font-size: 0.98rem; font-weight: 700; color: #ecfdf5; letter-spacing: -0.01em;">
-                    Bank Acceptance Certainty: 94% Probability of Execution (Linked ID: {linked_app_id})
-                </span>
+    if is_bank_user:
+        st.markdown(f"""
+        <div class="certainty-banner">
+            <div>
+                <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.2rem;">
+                    <span style="font-size: 1.15rem;">🔒</span>
+                    <span style="font-size: 0.98rem; font-weight: 700; color: #ecfdf5; letter-spacing: -0.01em;">
+                        Bank Acceptance Certainty: 94% Probability of Execution (Linked ID: {linked_app_id})
+                    </span>
+                </div>
+                <div style="font-size: 0.78rem; color: #a7f3d0; line-height: 1.45;">
+                    Pre-audited against Banca d'Italia provincial NPL benchmarks and EBA loan origination rules.
+                    <b>Zero guessing. Zero black-box rejections.</b>
+                </div>
             </div>
-            <div style="font-size: 0.78rem; color: #a7f3d0; line-height: 1.45;">
-                Pre-audited against Banca d'Italia provincial NPL benchmarks and EBA loan origination rules. 
-                <b>Zero guessing. Zero black-box rejections.</b>
+            <div style="text-align: right; font-family: 'JetBrains Mono', monospace;">
+                <span style="font-size: 0.68rem; color: #6ee7b7; text-transform: uppercase; letter-spacing: 0.05em;">AUDIT PROOF HASH</span><br>
+                <span style="font-size: 0.88rem; font-weight: 700; color: #ffffff;">SHA256: {audit_hash}</span>
             </div>
         </div>
-        <div style="text-align: right; font-family: 'JetBrains Mono', monospace;">
-            <span style="font-size: 0.68rem; color: #6ee7b7; text-transform: uppercase; letter-spacing: 0.05em;">AUDIT PROOF HASH</span><br>
-            <span style="font-size: 0.88rem; font-weight: 700; color: #ffffff;">SHA256: {audit_hash}</span>
+        """, unsafe_allow_html=True)
+    else:
+        st.markdown(f"""
+        <div class="origination-banner">
+            <div>
+                <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.2rem;">
+                    <span style="font-size: 1.15rem;">📂</span>
+                    <span style="font-size: 0.98rem; font-weight: 700; color: #e0f2fe; letter-spacing: -0.01em;">
+                        Origination pack ready — Application {linked_app_id}
+                    </span>
+                </div>
+                <div style="font-size: 0.78rem; color: #bae6fd; line-height: 1.45;">
+                    Speak or type your facility request below. Bank acceptance certainty is unlocked on the
+                    <b>underwriter desk</b> after delibera — this portal packages the file, it does not issue the decision.
+                </div>
+            </div>
+            <div style="text-align: right; font-family: 'JetBrains Mono', monospace;">
+                <span style="font-size: 0.68rem; color: #7dd3fc; text-transform: uppercase; letter-spacing: 0.05em;">DOSSIER HASH</span><br>
+                <span style="font-size: 0.88rem; font-weight: 700; color: #ffffff;">SHA256: {audit_hash}</span>
+            </div>
         </div>
-    </div>
-    """, unsafe_allow_html=True)
+        """, unsafe_allow_html=True)
 
     # SME Request Overview Grid
     st.markdown(f"""
@@ -1123,26 +1255,73 @@ with tab_dossier:
     </div>
     """, unsafe_allow_html=True)
 
-    # Prompt Execution
-    col_q, col_b = st.columns([5, 1])
+    prompt_label = (
+        "Underwriter prompt (type or speak any query):"
+        if is_bank_user
+        else "Borrower prompt (type or speak any facility request):"
+    )
+    col_q, col_mic, col_b = st.columns([4.2, 1.35, 1.35])
     with col_q:
         user_query = st.text_input(
-            "Credit Analysis Trigger:",
-            value=st.session_state["query_input"]
+            prompt_label,
+            key="query_input",
+            placeholder="e.g. Assess a €750k sustainability-linked loan for EcoTex Milano in Milan",
+        )
+    with col_mic:
+        st.caption("Voice")
+        recorded_prompt = st.audio_input(
+            "Speak prompt",
+            key="dossier_voice_prompt",
+            label_visibility="collapsed",
+            disabled=not stt_available(),
+            help="Record a prompt. It is transcribed with Amazon Bedrock (Gemini fallback) and evaluated for both SME and bank roles.",
+        )
+        apply_voice_prompt(
+            recorded_prompt,
+            fingerprint_key="dossier_voice_fingerprint",
+            target_key="query_input",
+            auto_evaluate=True,
         )
     with col_b:
         st.write("")
-        st.write("")
         run_eval = st.button("🚀 Evaluate Now", type="primary", width="stretch")
 
-    with st.spinner("FinSight AI fusing DuckDB balance sheet, Banca d'Italia metrics, and ESG disclosures..."):
-        payload, execution_mode, status_msg = evaluate_application(
-            query=user_query,
-            company_id=active_cid,
-            loan_amount=current_req_amt,
-            backend_url=backend_url,
-            force_mock=use_force_mock
+    if not stt_available():
+        st.caption(
+            "Microphone is idle until `AWS_BEARER_TOKEN_BEDROCK` or `GEMINI_API_KEY` is set in `.env`."
         )
+    elif status := st.session_state.get("voice_status"):
+        st.caption(status)
+
+    parsed_cid, parsed_amt = parse_query_fields(user_query or "")
+    eval_cid = active_cid
+    if is_bank_user and parsed_cid:
+        eval_cid = parsed_cid
+        cid_to_app = {"ecotex": "ECOTEX-2026-IT", "meccanica": "MECCANICA-2026-IT", "agrobio": "AGROBIO-2026-IT"}
+        if parsed_cid in cid_to_app and st.session_state.get("linked_id") != cid_to_app[parsed_cid]:
+            st.session_state["linked_id"] = cid_to_app[parsed_cid]
+            st.session_state["active_company_id"] = parsed_cid
+    eval_amt = parsed_amt or current_req_amt
+
+    pending_eval = st.session_state.pop("pending_eval", False)
+    should_eval = run_eval or pending_eval or "last_eval_payload" not in st.session_state
+
+    if should_eval:
+        with st.spinner("FinSight AI fusing DuckDB balance sheet, Banca d'Italia metrics, and ESG disclosures..."):
+            payload, execution_mode, status_msg = evaluate_application(
+                query=user_query or st.session_state.get("query_input", ""),
+                company_id=eval_cid,
+                loan_amount=eval_amt,
+                backend_url=backend_url,
+                force_mock=use_force_mock,
+            )
+        st.session_state["last_eval_payload"] = payload
+        st.session_state["last_eval_mode"] = execution_mode
+        st.session_state["last_eval_status"] = status_msg
+    else:
+        payload = st.session_state["last_eval_payload"]
+        execution_mode = st.session_state.get("last_eval_mode", "DETERMINISTIC_FALLBACK")
+        status_msg = st.session_state.get("last_eval_status", "")
 
     mode_badge = "badge-success" if execution_mode == "LIVE_API" else "badge-warning"
     st.markdown(f"""
@@ -1325,6 +1504,104 @@ with tab_dossier:
             loan_amt=current_req_amt,
             interest_rate=base_data.get("interest_rate", 5.15)
         )
+
+
+# ==========================================
+# TAB: VOICE ANALYTICS
+# ==========================================
+with tab_voice:
+    flush_pending_voice_prompt()
+    st.markdown("### Voice Analytics")
+    st.markdown("""
+    Speak or type a question. Audio is transcribed with **Amazon Bedrock** (Gemini fallback),
+    then translated into **read-only SQL** against DuckDB — answers come from your data.
+    Both SME borrowers and bank underwriters can use this console.
+    """)
+
+    if not stt_available():
+        st.info(
+            "Voice needs Amazon Bedrock (`AWS_BEARER_TOKEN_BEDROCK`) or a Gemini key "
+            "(`GEMINI_API_KEY` / `GOOGLE_API_KEY`) in `.env` (or Streamlit **Secrets** when hosted). "
+            "You can still type a question below."
+        )
+
+    voice_col, text_col = st.columns([2, 3])
+
+    with voice_col:
+        st.markdown("**1. Tap the microphone and speak**")
+        recorded = st.audio_input(
+            "Record a question",
+            key="analytics_voice_prompt",
+            disabled=not stt_available(),
+            help="Click the mic. SME and bank users can ask any analytics question.",
+        )
+        apply_voice_prompt(
+            recorded,
+            fingerprint_key="voice_fingerprint",
+            target_key="question_seed",
+            auto_evaluate=False,
+        )
+        if status := st.session_state.get("voice_status"):
+            st.caption(status)
+
+    with text_col:
+        st.markdown("**2. Confirm or type the question**")
+        analytics_question = st.text_input(
+            "Analytics question",
+            value=st.session_state.get("question_seed", ""),
+            placeholder="e.g. Which provinces have the highest loan default rate?",
+        )
+
+        example_questions = [
+            "What is EcoTex Milano's revenue and EBITDA?",
+            "Which province has the highest loan default rate?",
+            "Show sector turnover in Milano by year",
+        ]
+        chosen_example = st.selectbox(
+            "Example questions", options=["-"] + example_questions, index=0
+        )
+        if chosen_example != "-" and st.button("Use this example"):
+            st.session_state["question_seed"] = chosen_example
+            st.rerun()
+
+        run_query = st.button(
+            "Run voice / text query",
+            type="primary",
+            disabled=not bool(analytics_question and analytics_question.strip()),
+            width="stretch",
+        )
+
+    if run_query and analytics_question:
+        with st.spinner("Translating your question into SQL and querying DuckDB..."):
+            nl_result = run_nl_query(analytics_question)
+
+        if nl_result["error"]:
+            st.error(nl_result["error"])
+            if nl_result.get("sql"):
+                with st.expander("SQL that was rejected"):
+                    st.code(nl_result["sql"], language="sql")
+        else:
+            guard_note = (
+                "read-only connection" if nl_result["read_only"] else "guarded connection"
+            )
+            st.success(
+                f"{nl_result['row_count']} row(s) returned via {guard_note}."
+            )
+            if nl_result["rows"]:
+                st.dataframe(
+                    [dict(zip(nl_result["columns"], row)) for row in nl_result["rows"]],
+                    width="stretch",
+                    hide_index=True,
+                )
+            else:
+                st.caption(nl_result["status"])
+
+            with st.expander("Show the generated SQL"):
+                st.code(nl_result["sql"], language="sql")
+                st.caption(
+                    "Validated as a single read-only SELECT with an enforced row limit "
+                    "before execution."
+                )
 
 
 # ==========================================

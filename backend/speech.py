@@ -1,26 +1,26 @@
-"""Speech-to-text for the voice analytics console.
+"""Speech-to-text for voice prompts.
 
-Gemini is used because it accepts inline audio directly, so the project needs no
-transcription provider beyond the key already in the summary chain. The key is
-read from the environment via Settings and never held anywhere else.
+Amazon Bedrock (Nova Lite audio) is tried first using the same AWS credentials
+as the summary chain. Gemini is the fallback when it can accept inline audio.
+Credentials stay in the environment; they are never logged.
 """
 
 from __future__ import annotations
 
 import logging
 
-from backend.config import settings
+from backend.config import gemini_key, settings
+from backend.llm import bedrock_available
 
 logger = logging.getLogger(__name__)
 
 TRANSCRIBE_INSTRUCTION = (
-    "Transcribe this audio verbatim. It is a spoken question from a loan officer "
-    "about a company's financial or ESG analytics, so preserve financial terms, "
-    "company names and numbers exactly. Return only the transcript text, with no "
-    "commentary, quotes or preamble."
+    "Transcribe this audio verbatim. It is a spoken credit, financial, or "
+    "analytics prompt from either an SME borrower or a bank underwriter. "
+    "Preserve company names, currencies, amounts, and financial terms exactly. "
+    "Return only the transcript text, with no commentary, quotes, or preamble."
 )
 
-# Streamlit's audio_input returns WAV; keep a small map for other inputs.
 _MIME_BY_SUFFIX = {
     "wav": "audio/wav",
     "mp3": "audio/mp3",
@@ -30,10 +30,23 @@ _MIME_BY_SUFFIX = {
     "flac": "audio/flac",
 }
 
+_FORMAT_BY_MIME = {
+    "audio/wav": "wav",
+    "audio/x-wav": "wav",
+    "audio/wave": "wav",
+    "audio/mpeg": "mp3",
+    "audio/mp3": "mp3",
+    "audio/mp4": "mp4",
+    "audio/m4a": "m4a",
+    "audio/ogg": "ogg",
+    "audio/webm": "webm",
+    "audio/flac": "flac",
+}
+
 
 def stt_available() -> bool:
-    """True when a Gemini key is configured, so the UI can explain itself."""
-    return bool(settings.gemini_api_key)
+    """True when Bedrock or Gemini can transcribe audio."""
+    return bedrock_available() or bool(gemini_key())
 
 
 def mime_for(filename: str) -> str:
@@ -41,27 +54,49 @@ def mime_for(filename: str) -> str:
     return _MIME_BY_SUFFIX.get(suffix, "audio/wav")
 
 
-def transcribe(audio_bytes: bytes, mime_type: str = "audio/wav") -> tuple[str | None, str]:
-    """Transcribe spoken audio.
+def _audio_format(mime_type: str) -> str:
+    return _FORMAT_BY_MIME.get((mime_type or "").lower(), "wav")
 
-    Returns the transcript and a status message. The transcript is None when
-    transcription is unavailable or failed, which the caller surfaces to the user
-    rather than treating as an empty question.
-    """
-    if not audio_bytes:
-        return None, "No audio captured."
 
-    if not settings.gemini_api_key:
-        return None, (
-            "Voice input needs a Gemini API key. Set GEMINI_API_KEY in .env "
-            "(or in Streamlit secrets when hosted), then reload."
+def _transcribe_with_bedrock(audio_bytes: bytes, mime_type: str) -> str | None:
+    if not bedrock_available():
+        return None
+    try:
+        import boto3
+
+        client = boto3.client("bedrock-runtime", region_name=settings.bedrock_region)
+        response = client.converse(
+            modelId=settings.bedrock_stt_model_id,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "audio": {
+                                "format": _audio_format(mime_type),
+                                "source": {"bytes": audio_bytes},
+                            }
+                        },
+                        {"text": TRANSCRIBE_INSTRUCTION},
+                    ],
+                }
+            ],
+            inferenceConfig={"temperature": 0.0, "maxTokens": 512},
         )
+        return response["output"]["message"]["content"][0]["text"].strip()
+    except Exception as exc:
+        logger.warning("Bedrock transcription failed: %s", exc)
+        return None
 
+
+def _transcribe_with_gemini(audio_bytes: bytes, mime_type: str) -> str | None:
+    if not gemini_key():
+        return None
     try:
         from google import genai
         from google.genai import types
 
-        client = genai.Client(api_key=settings.gemini_api_key)
+        client = genai.Client(api_key=gemini_key())
         response = client.models.generate_content(
             model=settings.gemini_model,
             contents=[
@@ -69,10 +104,27 @@ def transcribe(audio_bytes: bytes, mime_type: str = "audio/wav") -> tuple[str | 
                 types.Part.from_bytes(data=audio_bytes, mime_type=mime_type),
             ],
         )
-        transcript = (response.text or "").strip()
-        if not transcript:
-            return None, "Gemini returned an empty transcript. Try recording again."
-        return transcript, f"Transcribed {len(audio_bytes) / 1024:.0f} KB of audio via Gemini."
+        return (response.text or "").strip()
     except Exception as exc:
         logger.warning("Gemini transcription failed: %s", exc)
-        return None, f"Transcription failed ({type(exc).__name__}). You can type the question instead."
+        return None
+
+
+def transcribe(audio_bytes: bytes, mime_type: str = "audio/wav") -> tuple[str | None, str]:
+    """Transcribe spoken audio. Returns (transcript, status message)."""
+    if not audio_bytes:
+        return None, "No audio captured."
+
+    if not stt_available():
+        return None, (
+            "Voice input needs Amazon Bedrock (`AWS_BEARER_TOKEN_BEDROCK`) or a Gemini key "
+            "(`GEMINI_API_KEY` / `GOOGLE_API_KEY`) in `.env`, then reload."
+        )
+
+    if text := _transcribe_with_bedrock(audio_bytes, mime_type):
+        return text, f"Transcribed {len(audio_bytes) / 1024:.0f} KB of audio via Amazon Bedrock."
+
+    if text := _transcribe_with_gemini(audio_bytes, mime_type):
+        return text, f"Transcribed {len(audio_bytes) / 1024:.0f} KB of audio via Gemini."
+
+    return None, "Transcription failed. Type the prompt instead, or record again."
