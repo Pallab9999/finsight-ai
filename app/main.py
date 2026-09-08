@@ -216,6 +216,9 @@ st.markdown("""
         letter-spacing: -0.01em !important;
         border-radius: 9px !important;
         padding: 0.55rem 1.25rem !important;
+        position: relative !important;
+        z-index: 3 !important;
+        cursor: pointer !important;
         box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.25), 0 4px 16px rgba(2, 132, 199, 0.35) !important;
         transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1) !important;
     }
@@ -583,6 +586,11 @@ def create_gauge(value: int, title: str, benchmark: int, color_theme: str = "blu
         font={'color': "#f8fafc", 'family': "Plus Jakarta Sans, Inter"}
     )
     return fig
+
+
+def queue_evaluation() -> None:
+    """Mark an evaluation to run at the start of this (or the next) script pass."""
+    st.session_state["pending_eval"] = True
 
 
 def apply_voice_prompt(
@@ -1119,6 +1127,8 @@ if st.sidebar.button("⚡ EcoTex Milano S.p.A. (€750k CapEx)", width="stretch"
     st.session_state["query_input"] = "Assess a €750k sustainability-linked equipment loan for EcoTex Milano, a textile manufacturer in Milan."
     st.session_state["active_company_id"] = "ecotex"
     st.session_state["linked_id"] = "ECOTEX-2026-IT"
+    st.session_state.pop("last_eval_payload", None)
+    queue_evaluation()
     st.rerun()
 
 if is_bank_user:
@@ -1126,12 +1136,16 @@ if is_bank_user:
         st.session_state["query_input"] = "Assess a €500k facility for Meccanica Precisione Varese to install 5-axis CNC machines."
         st.session_state["active_company_id"] = "meccanica"
         st.session_state["linked_id"] = "MECCANICA-2026-IT"
+        st.session_state.pop("last_eval_payload", None)
+        queue_evaluation()
         st.rerun()
 
     if st.sidebar.button("⚡ AgroBio Brianza Soc. Coop. (€400k Bio)", width="stretch"):
         st.session_state["query_input"] = "Assess a €400k green facility for AgroBio Brianza bio-degradable packaging line."
         st.session_state["active_company_id"] = "agrobio"
         st.session_state["linked_id"] = "AGROBIO-2026-IT"
+        st.session_state.pop("last_eval_payload", None)
+        queue_evaluation()
         st.rerun()
 
 if "query_input" not in st.session_state:
@@ -1322,7 +1336,7 @@ with tab_dossier:
         if is_bank_user
         else "Borrower prompt (type or speak any facility request):"
     )
-    col_q, col_mic, col_b = st.columns([4.2, 1.35, 1.35])
+    col_q, col_mic = st.columns([5.6, 1.4])
     with col_q:
         user_query = st.text_input(
             prompt_label,
@@ -1338,15 +1352,23 @@ with tab_dossier:
             disabled=not stt_available(),
             help="Record a prompt. It is converted to text and evaluated for both SME and bank roles.",
         )
+
+    run_eval = st.button(
+        "Evaluate Now",
+        type="primary",
+        key="evaluate_now_btn",
+        width="stretch",
+        on_click=queue_evaluation,
+    )
+
+    pending_eval = bool(run_eval) or bool(st.session_state.pop("pending_eval", False))
+    if not pending_eval:
         apply_voice_prompt(
             recorded_prompt,
             fingerprint_key="dossier_voice_fingerprint",
             target_key="query_input",
             auto_evaluate=True,
         )
-    with col_b:
-        st.write("")
-        run_eval = st.button("🚀 Evaluate Now", type="primary", width="stretch")
 
     if not stt_available():
         if bedrock_available() and not bedrock_api_key_format_ok():
@@ -1363,26 +1385,45 @@ with tab_dossier:
     if is_bank_user and parsed_cid:
         eval_cid = parsed_cid
         cid_to_app = {"ecotex": "ECOTEX-2026-IT", "meccanica": "MECCANICA-2026-IT", "agrobio": "AGROBIO-2026-IT"}
-        if parsed_cid in cid_to_app and st.session_state.get("linked_id") != cid_to_app[parsed_cid]:
-            st.session_state["linked_id"] = cid_to_app[parsed_cid]
+        next_app = cid_to_app.get(parsed_cid)
+        if next_app and st.session_state.get("linked_id") != next_app:
+            st.session_state["linked_id"] = next_app
             st.session_state["active_company_id"] = parsed_cid
+            st.session_state["pending_eval"] = True
+            st.rerun()
     eval_amt = parsed_amt or current_req_amt
 
-    pending_eval = st.session_state.pop("pending_eval", False)
-    should_eval = run_eval or pending_eval or "last_eval_payload" not in st.session_state
+    should_eval = pending_eval or "last_eval_payload" not in st.session_state
 
     if should_eval:
         with st.spinner("FinSight AI fusing DuckDB balance sheet, Banca d'Italia metrics, and ESG disclosures..."):
-            payload, execution_mode, status_msg = evaluate_application(
-                query=user_query or st.session_state.get("query_input", ""),
-                company_id=eval_cid,
-                loan_amount=eval_amt,
-                backend_url=backend_url,
-                force_mock=use_force_mock,
-            )
+            try:
+                payload, execution_mode, status_msg = evaluate_application(
+                    query=user_query or st.session_state.get("query_input", ""),
+                    company_id=eval_cid,
+                    loan_amount=eval_amt,
+                    backend_url=backend_url,
+                    force_mock=use_force_mock,
+                )
+            except Exception as exc:
+                payload = calculate_deterministic_bankability(
+                    company_id=eval_cid,
+                    requested_amount=eval_amt,
+                )
+                execution_mode = "DETERMINISTIC_FALLBACK"
+                status_msg = f"Evaluation recovered via DuckDB ({type(exc).__name__})."
         st.session_state["last_eval_payload"] = payload
         st.session_state["last_eval_mode"] = execution_mode
         st.session_state["last_eval_status"] = status_msg
+        if pending_eval:
+            rec = payload.get("recommendation", "REVIEW")
+            score = payload.get("financial_score", "")
+            amt = payload.get("loan_amount", eval_amt)
+            company = payload.get("company", "")
+            st.success(
+                f"Evaluated {company}: €{amt:,.0f} → {rec} "
+                f"(financial score {score}/100)."
+            )
     else:
         payload = st.session_state["last_eval_payload"]
         execution_mode = st.session_state.get("last_eval_mode", "DETERMINISTIC_FALLBACK")
