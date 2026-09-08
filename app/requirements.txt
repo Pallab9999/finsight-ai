@@ -1,0 +1,8 @@
+streamlit
+pandas
+numpy
+python-dotenv
+openai
+anthropic
+langchain
+plotly

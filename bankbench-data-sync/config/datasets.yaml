@@ -1,0 +1,14 @@
+# Registro dei dataset dati.lombardia.it da sincronizzare.
+# Popolato manualmente (anche con l'aiuto di `python main.py discover --category Commercio`).
+#
+# ATTENZIONE (vedi README): la categoria "Commercio" contiene soprattutto
+# anagrafiche punti vendita (localizzazione, superfici), NON margini
+# economici per settore. Per i margini/redditività per ATECO servono altre
+# fonti (Camera di Commercio, ISTAT, Cerved/AIDA) — vedi nota nel README.
+
+datasets:
+  - dataset_id: "98xy-uigr"
+    name: "Mappa commercio al dettaglio in Lombardia"
+    category: "Commercio"
+    expected_columns: []  # popolare dopo il primo sync ispezionando data/bankbench_data_sync.db
+    page_size: 1000
