@@ -18,7 +18,9 @@ from rag.retrieval import search_documents
 
 @pytest.fixture(scope="module", autouse=True)
 def setup_db(tmp_path_factory):
-    db_path = ROOT / "data" / "finsight.duckdb"
+    from backend.config import settings
+
+    db_path = settings.duckdb_path
     seed_database(db_path)
     return db_path
 

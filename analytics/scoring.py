@@ -7,6 +7,21 @@ def _clamp(value: float, lo: float = 0.0, hi: float = 100.0) -> float:
     return max(lo, min(hi, value))
 
 
+def num(data: dict[str, Any], key: str, default: float) -> float:
+    """Read a number, using ``default`` only when the value is missing.
+
+    ``float(x or default)`` treated a real 0 as missing: a 0% default rate became
+    2%, and a zero carbon exposure became 0.5.
+    """
+    value = data.get(key)
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def score_liquidity(liquidity_ratio: float) -> float:
     if liquidity_ratio >= 1.5:
         return 90
@@ -64,11 +79,11 @@ def compute_financial_score(
     leverage = score_leverage(ratios.get("leverage_ratio", 0.8))
     growth = score_growth(ratios.get("revenue_growth", 0.0))
 
-    sector_index = float(sector_data.get("economic_performance_index", 1.0) or 1.0)
+    sector_index = num(sector_data, "economic_performance_index", 1.0)
     sector = score_sector(sector_index)
 
-    regional_liq = float(regional_data.get("liquidity_indicator", 0.75) or 0.75)
-    default_rate = float(regional_data.get("loan_default_rate", 0.02) or 0.02)
+    regional_liq = num(regional_data, "liquidity_indicator", 0.75)
+    default_rate = num(regional_data, "loan_default_rate", 0.02)
     regional = score_regional(regional_liq, default_rate)
 
     loan_burden = loan_amount / revenue if revenue > 0 else 1.0

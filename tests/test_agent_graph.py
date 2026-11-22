@@ -16,7 +16,9 @@ from ingestion.loaders import seed_database
 
 @pytest.fixture(scope="module", autouse=True)
 def setup_db():
-    seed_database(ROOT / "data" / "finsight.duckdb")
+    from backend.config import settings
+
+    seed_database(settings.duckdb_path)
 
 
 def test_langgraph_evaluate():

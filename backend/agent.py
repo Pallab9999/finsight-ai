@@ -7,6 +7,7 @@ import logging
 import re
 from typing import Any
 
+from analytics.amounts import parse_amount
 from analytics.esg import score_esg
 from analytics.financial import compute_ratios
 from analytics.scenario import simulate_scenario
@@ -32,7 +33,31 @@ from ingestion.loaders import get_connection, seed_database, ensure_sme_profiles
 
 logger = logging.getLogger(__name__)
 
-AUDIT_TRAIL: list[str] = []
+DEFAULT_LOAN_AMOUNT = 750_000
+DEFAULT_SCENARIO_AMOUNT = 1_000_000
+# Interest rate assumed on extra (or removed) financing in the what-if scenario.
+SCENARIO_INTEREST_RATE = 0.045
+
+NEUTRAL_SECTOR = {"economic_performance_index": 1.0}
+NEUTRAL_REGION = {"liquidity_indicator": 0.75, "loan_default_rate": 0.02}
+NEUTRAL_ESG = {
+    "environmental_indicator": 0.5,
+    "social_indicator": 0.5,
+    "governance_indicator": 0.5,
+    "carbon_exposure": 0.5,
+    "evidence_quality": 0.5,
+}
+
+
+class CompanyNotFoundError(LookupError):
+    """The request names no company we hold financials for."""
+
+
+def default_scenario_amount(loan_amount: int) -> int:
+    """€1M stress case, or +33% (rounded to €50k) when the loan is already €1M or more."""
+    if loan_amount < DEFAULT_SCENARIO_AMOUNT:
+        return DEFAULT_SCENARIO_AMOUNT
+    return int(round(loan_amount * 4 / 3 / 50_000) * 50_000)
 
 
 def _ensure_database() -> None:
@@ -50,7 +75,9 @@ def parse_query(query: str) -> dict[str, Any]:
     q = query.strip()
     q_lower = q.lower()
 
-    company = "EcoTex Milano"
+    # None when no company can be identified: callers must not silently
+    # assess a different company than the one asked about.
+    company: str | None = None
     if "meccanica" in q_lower or "varese" in q_lower:
         company = "Meccanica Precisione Varese"
     elif "agrobio" in q_lower or "brianza" in q_lower:
@@ -80,14 +107,7 @@ def parse_query(query: str) -> dict[str, Any]:
     elif "manufactur" in q_lower:
         sector = "Manufacturing"
 
-    loan_amount = 750_000
-    if match := re.search(r"€?\s*([\d.,]+)\s*[kK]", q):
-        loan_amount = int(float(match.group(1).replace(",", ".")) * 1000)
-    elif match := re.search(r"€?\s*([\d.,]+)", q):
-        val = float(match.group(1).replace(",", "").replace(".", ""))
-        if val < 10000:
-            val *= 1000
-        loan_amount = int(val)
+    loan_amount = parse_amount(q) or DEFAULT_LOAN_AMOUNT
 
     purpose = "equipment financing"
     if "sustainability" in q_lower or "green" in q_lower:
@@ -96,7 +116,7 @@ def parse_query(query: str) -> dict[str, Any]:
         purpose = "working capital"
 
     return {
-        "company": company.strip(),
+        "company": company.strip() if company else None,
         "province": standardize_province(province),
         "sector": standardize_sector(sector),
         "loan_amount": loan_amount,
@@ -156,6 +176,7 @@ def _generate_summary(
     recommendation: str,
     drivers: list[str],
     scenario: dict[str, Any],
+    audit: list[str],
 ) -> str:
     prompt = f"""You are a bank credit analyst assistant. Write a 2-3 sentence executive summary.
 
@@ -172,16 +193,24 @@ Rules: Be direct. Do not invent numbers. Label as decision-support, not advice."
 
     text, provider = generate_summary(prompt)
     if text:
-        AUDIT_TRAIL.append(f"Executive summary synthesised via {provider}")
+        audit.append(f"Executive summary synthesised via {provider}")
         return text
 
-    AUDIT_TRAIL.append("Executive summary generated from deterministic template")
+    audit.append("Executive summary generated from deterministic template")
+    sc_score = scenario["financial_score"]
+    direction = "Increasing" if scenario["loan_amount"] > parsed["loan_amount"] else "Reducing"
+    if sc_score < financial_score:
+        effect = f"lowers the financial score to {sc_score}"
+    elif sc_score > financial_score:
+        effect = f"raises the financial score to {sc_score}"
+    else:
+        effect = f"leaves the financial score at {sc_score}"
     return (
         f"{parsed['company']} presents a financial health score of {financial_score}/100 and "
         f"ESG alignment of {esg_score}/100 under the base €{parsed['loan_amount']:,} scenario, "
         f"yielding a {recommendation} recommendation with {risk_level.lower()} risk. "
-        f"Increasing financing to €{scenario['loan_amount']:,} reduces the financial score to "
-        f"{scenario['financial_score']} and shifts the recommendation to {scenario['recommendation']}."
+        f"{direction} financing to €{scenario['loan_amount']:,} {effect} "
+        f"with a {scenario['recommendation']} recommendation."
     )
 
 
@@ -198,70 +227,105 @@ def evaluate_request(
     loan_amount_override: int | None = None,
     company_id: str | None = None,
 ) -> EvaluateResponse:
-    """Full evaluation pipeline."""
-    global AUDIT_TRAIL
-    AUDIT_TRAIL = []
+    """Full evaluation pipeline.
+
+    The audit trail is built per call. It used to be a module-level list that
+    concurrent requests shared (FastAPI runs sync endpoints in a thread pool),
+    so one request could return another request's trail.
+    """
+    audit: list[str] = []
 
     _ensure_database()
     parsed = parse_query(query)
-    if company_id and company_id in COMPANY_BY_ID:
+    if company_id:
+        if company_id not in COMPANY_BY_ID:
+            raise CompanyNotFoundError(f"Unknown company_id: {company_id}")
         parsed["company"] = COMPANY_BY_ID[company_id]
     company = parsed["company"]
+    if not company:
+        if is_magic_query(query):
+            return get_fallback_response()
+        raise CompanyNotFoundError(
+            "Could not identify the company in the request. Name it, e.g. "
+            "'Assess a €500k loan for Meccanica Precisione Varese'."
+        )
     loan_amount = loan_amount_override or parsed["loan_amount"]
     parsed["loan_amount"] = loan_amount
-    scenario_amount = scenario_loan_amount or 1_000_000
+    scenario_amount = scenario_loan_amount or default_scenario_amount(loan_amount)
 
-    AUDIT_TRAIL.append("Query parsed")
+    audit.append("Query parsed")
     financials = get_company_financials(company)
-    AUDIT_TRAIL.append("Company financials queried")
+    audit.append("Company financials queried")
     if "error" in financials:
         if is_magic_query(query):
             return get_fallback_response()
-        raise ValueError(financials["error"])
+        raise CompanyNotFoundError(financials["error"])
+    company = financials.get("company_name", company)
+    parsed["company"] = company
 
     province = financials.get("province") or parsed["province"]
     sector = financials.get("sector") or parsed["sector"]
 
     regional = get_regional_risk(province)
-    AUDIT_TRAIL.append("Regional risk queried")
+    if "error" in regional:
+        audit.append(f"Regional risk unavailable for {province}: neutral assumptions used")
+        regional_for_scoring = NEUTRAL_REGION
+    else:
+        audit.append("Regional risk queried")
+        regional_for_scoring = regional
+
     sector_data = get_sector_performance(province, sector)
-    AUDIT_TRAIL.append("Sector performance queried")
+    if "error" in sector_data:
+        audit.append(f"Sector data unavailable for {sector} in {province}: neutral index used")
+        sector_for_scoring = NEUTRAL_SECTOR
+    else:
+        matched = str(sector_data.get("sector_name") or "")
+        if sector.lower() not in matched.lower():
+            audit.append(f"No sector data for {sector} in {province}: used '{matched}' as proxy")
+        else:
+            audit.append("Sector performance queried")
+        sector_for_scoring = sector_data
+
     doc_results = search_documents(
         f"{parsed['loan_purpose']} ESG sustainability {sector}",
         company_name=company,
     )
-    AUDIT_TRAIL.append("ESG evidence retrieved")
+    audit.append("ESG evidence retrieved" if doc_results else "No ESG documents found for company")
 
     esg_row = _load_esg(company)
+    if esg_row is None:
+        audit.append("No ESG indicators on file: neutral 0.5 indicators used")
+        esg_row = dict(NEUTRAL_ESG)
     esg_result = score_esg(esg_row, parsed["loan_purpose"])
     ratios = compute_ratios(financials)
-    revenue = float(financials.get("revenue", 0) or 0)
+    revenue = float(financials.get("revenue") or 0)
 
     fin_result = compute_financial_score(
         ratios,
-        sector_data if "error" not in sector_data else {"economic_performance_index": 1.0},
-        regional if "error" not in regional else {"liquidity_indicator": 0.75, "loan_default_rate": 0.02},
+        sector_for_scoring,
+        regional_for_scoring,
         loan_amount,
         revenue,
     )
-    AUDIT_TRAIL.append("Deterministic scoring engine executed")
+    audit.append("Deterministic scoring engine executed")
 
     risk_level = classify_risk(fin_result["financial_score"], esg_result["esg_score"], ratios["leverage_ratio"])
     recommendation = recommend(fin_result["financial_score"], esg_result["esg_score"], risk_level)
     sector_outlook = classify_sector_outlook(
-        float(sector_data.get("economic_performance_index", 1.0) if "error" not in sector_data else 1.0)
+        float(sector_for_scoring.get("economic_performance_index", 1.0))
     )
 
     sim = simulate_scenario(
         financials,
         esg_row,
-        sector_data if "error" not in sector_data else {"economic_performance_index": 1.0},
-        regional if "error" not in regional else {"liquidity_indicator": 0.75, "loan_default_rate": 0.02},
+        sector_for_scoring,
+        regional_for_scoring,
         loan_amount,
         scenario_amount,
         parsed["loan_purpose"],
+        interest_rate=SCENARIO_INTEREST_RATE,
     )
-    AUDIT_TRAIL.append("Scenario simulation completed")
+    audit.append("Scenario simulation completed")
 
     drivers = list(dict.fromkeys(fin_result["drivers"] + esg_result["drivers"]))[:5]
     evidence = _build_evidence(regional, sector_data, doc_results)
@@ -269,7 +333,10 @@ def evaluate_request(
 
     scenario_payload = {
         **sim["scenario"],
-        "dscr": round(float(ratios.get("interest_coverage", 1.5)) - max(0, (scenario_amount - loan_amount) / 500_000) * 0.15, 2),
+        # The backend has no repayment schedule, so it cannot compute a true
+        # DSCR. The old value was an arbitrary tweak of interest coverage;
+        # leave it empty rather than show an invented number.
+        "dscr": None,
         "summary": (
             f"At €{scenario_amount:,}, financial score is {sim['scenario']['financial_score']}/100 "
             f"with recommendation {sim['scenario']['recommendation']}."
@@ -284,10 +351,11 @@ def evaluate_request(
         recommendation,
         drivers,
         sim["scenario"],
+        audit,
     )
 
     return EvaluateResponse(
-        company=financials.get("company_name", company),
+        company=company,
         loan_amount=loan_amount,
         financial_score=fin_result["financial_score"],
         esg_score=esg_result["esg_score"],
@@ -297,13 +365,14 @@ def evaluate_request(
         confidence=confidence,
         drivers=drivers,
         evidence=evidence,
-        audit_trail=AUDIT_TRAIL.copy(),
+        audit_trail=audit,
         scenario=scenario,
         summary=summary,
     )
 
 
-def _load_esg(company_name: str) -> dict[str, Any]:
+def _load_esg(company_name: str) -> dict[str, Any] | None:
+    """ESG indicators for the company, or None when none are on file."""
     conn = get_connection(settings.duckdb_path)
     try:
         row = conn.execute(
@@ -316,13 +385,7 @@ def _load_esg(company_name: str) -> dict[str, Any]:
             [f"%{company_name}%"],
         ).fetchone()
         if not row:
-            return {
-                "environmental_indicator": 0.5,
-                "social_indicator": 0.5,
-                "governance_indicator": 0.5,
-                "carbon_exposure": 0.5,
-                "evidence_quality": 0.5,
-            }
+            return None
         cols = [
             "company_id", "company_name", "sector", "environmental_indicator",
             "social_indicator", "governance_indicator", "carbon_exposure",

@@ -19,7 +19,9 @@ from ingestion.loaders import seed_database
 
 @pytest.fixture(scope="module", autouse=True)
 def seeded():
-    seed_database(ROOT / "data" / "finsight.duckdb")
+    from backend.config import settings
+
+    seed_database(settings.duckdb_path)
 
 
 @pytest.mark.parametrize(

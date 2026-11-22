@@ -2,15 +2,19 @@
 
 from typing import Any
 
+from analytics.scoring import num
+
 
 def score_esg(esg_data: dict[str, Any], loan_purpose: str = "") -> dict[str, Any]:
-    environmental = float(esg_data.get("environmental_indicator", 0) or 0)
-    social = float(esg_data.get("social_indicator", 0) or 0)
-    governance = float(esg_data.get("governance_indicator", 0) or 0)
-    carbon_exposure = float(esg_data.get("carbon_exposure", 0.5) or 0.5)
-    evidence_quality = float(esg_data.get("evidence_quality", 0.7) or 0.7)
+    environmental = num(esg_data, "environmental_indicator", 0.0)
+    social = num(esg_data, "social_indicator", 0.0)
+    governance = num(esg_data, "governance_indicator", 0.0)
+    # A real 0 carbon exposure is the best case and must not become 0.5;
+    # a real 0 evidence quality must not be inflated to 0.7.
+    carbon_exposure = num(esg_data, "carbon_exposure", 0.5)
+    evidence_quality = num(esg_data, "evidence_quality", 0.7)
 
-    purpose_lower = loan_purpose.lower()
+    purpose_lower = (loan_purpose or "").lower()
     project_alignment = 0.85
     if any(k in purpose_lower for k in ("sustainability", "green", "energy", "recycling", "esg")):
         project_alignment = 0.95

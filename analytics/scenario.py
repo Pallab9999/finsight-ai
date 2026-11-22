@@ -8,6 +8,7 @@ from analytics.scoring import (
     classify_risk,
     classify_sector_outlook,
     compute_financial_score,
+    num,
     recommend,
 )
 
@@ -20,11 +21,15 @@ def simulate_scenario(
     base_loan_amount: int,
     scenario_loan_amount: int,
     loan_purpose: str = "",
+    interest_rate: float = 0.045,
 ) -> dict[str, Any]:
-    """Recalculate scores with a different loan amount."""
-    ratios = compute_ratios(financials)
-    revenue = float(financials.get("revenue", 0) or 0)
+    """Recalculate scores with a different loan amount.
 
+    The base case is scored exactly as the main assessment scores it. The
+    scenario applies the difference to the base loan as extra debt and interest
+    (or less of it, when the scenario is smaller), so a smaller loan can never
+    score worse than a larger one.
+    """
     base_result = _evaluate(
         financials, esg_data, sector_data, regional_data, base_loan_amount, loan_purpose
     )
@@ -36,6 +41,7 @@ def simulate_scenario(
         scenario_loan_amount,
         loan_purpose,
         base_loan_amount=base_loan_amount,
+        interest_rate=interest_rate,
     )
 
     return {
@@ -63,12 +69,15 @@ def _evaluate(
     loan_amount: int,
     loan_purpose: str,
     base_loan_amount: int | None = None,
+    interest_rate: float = 0.045,
 ) -> dict[str, Any]:
     adjusted = dict(financials)
-    if base_loan_amount is not None and loan_amount > base_loan_amount:
-        extra_debt = float(loan_amount - base_loan_amount)
-        adjusted["long_term_debt"] = float(financials.get("long_term_debt", 0) or 0) + extra_debt
-        adjusted["interest_expense"] = float(financials.get("interest_expense", 0) or 0) + extra_debt * 0.045
+    if base_loan_amount is not None and loan_amount != base_loan_amount:
+        delta = float(loan_amount - base_loan_amount)
+        lt_debt = float(financials.get("long_term_debt") or 0)
+        interest = float(financials.get("interest_expense") or 0)
+        adjusted["long_term_debt"] = max(0.0, lt_debt + delta)
+        adjusted["interest_expense"] = max(0.0, interest + delta * interest_rate)
 
     ratios = compute_ratios(adjusted)
     revenue = float(adjusted.get("revenue", 0) or 0)
@@ -84,7 +93,7 @@ def _evaluate(
         "risk_level": risk,
         "recommendation": rec,
         "sector_outlook": classify_sector_outlook(
-            float(sector_data.get("economic_performance_index", 1.0) or 1.0)
+            num(sector_data, "economic_performance_index", 1.0)
         ),
         "drivers": fin["drivers"] + esg["drivers"],
     }

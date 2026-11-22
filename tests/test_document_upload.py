@@ -25,7 +25,9 @@ from rag.retrieval import search_documents
 
 @pytest.fixture(scope="module", autouse=True)
 def seeded():
-    seed_database(ROOT / "data" / "finsight.duckdb")
+    from backend.config import settings
+
+    seed_database(settings.duckdb_path)
 
 
 def test_chunk_short_text_is_single_chunk():
