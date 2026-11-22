@@ -787,12 +787,19 @@ def calculate_deterministic_bankability(
         })
 
     # 7. Audit Trail & Drivers
+    # Wording follows the numbers: the old fixed text called a 4.9x leverage
+    # "contenuta" against a 2.5x covenant and any margin "solido".
+    margin_word = "solido" if ebitda_margin >= 15 else ("moderato" if ebitda_margin >= 8 else "ridotto")
+    dscr_word = "sopra" if dscr >= 1.30 else "sotto"
+    lev_word = "entro la" if net_debt_ebitda <= 2.5 else "sopra la"
+    npl_word = "ridotto" if bdi_npl < 2.95 else "elevato"
+    sector_word = "favorevole" if sector_growth > 0 else "debole"
     drivers = [
-        f"Fatturato d'esercizio a €{revenue/1e6:.2f}M con margine EBITDA solido al {ebitda_margin}%",
-        f"Debt Service Coverage Ratio (DSCR) pari a {dscr:.2f}x a fronte di una linea richiesta di €{requested_amount:,.0f}",
-        f"Leva finanziaria Net Debt / EBITDA contenuta a {net_debt_ebitda:.2f}x (Soglia covenant < 2.50x)",
-        f"Rischio territoriale ridotto: Tasso di default NPL Banca d'Italia a {province} pari a {bdi_npl:.2f}% (vs 2.95% media Italia)",
-        f"Dinamica settoriale favorevole: {sector} in {region} a +{sector_growth:.1f}% YoY"
+        f"Fatturato d'esercizio a €{revenue/1e6:.2f}M con margine EBITDA {margin_word} al {ebitda_margin}%",
+        f"DSCR pari a {dscr:.2f}x, {dscr_word} il covenant di 1.30x, su una linea richiesta di €{requested_amount:,.0f}",
+        f"Leva finanziaria Net Debt / EBITDA a {net_debt_ebitda:.2f}x, {lev_word} soglia covenant di 2.50x",
+        f"Rischio territoriale {npl_word}: tasso di default NPL Banca d'Italia a {province} pari a {bdi_npl:.2f}% (vs 2.95% media Italia)",
+        f"Dinamica settoriale {sector_word}: {sector} in {region} a {sector_growth:+.1f}% YoY"
     ]
 
     audit_trail = [

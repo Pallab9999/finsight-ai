@@ -17,6 +17,7 @@ import io
 import re
 import requests
 from typing import Dict, Any, Tuple, Optional
+from analytics.amounts import parse_amount
 from app.mock_data import get_base_demo_payload, calculate_scenario
 from app.auth import verify_credentials
 from app.duckdb_engine import (
@@ -46,20 +47,8 @@ def parse_query_fields(query: str) -> Tuple[Optional[str], Optional[int]]:
             company_id = mapped
             break
 
-    amount = None
-    if match := re.search(r"(?:€|eur|euro)?\s*([\d.,]+)\s*[kK]\b", text):
-        amount = int(float(match.group(1).replace(",", ".")) * 1000)
-    elif match := re.search(r"(?:€|eur|euro)\s*([\d.,]+)", text, re.I):
-        raw = match.group(1).replace(",", "")
-        try:
-            val = float(raw)
-        except ValueError:
-            val = 0
-        if 0 < val < 10_000:
-            val *= 1000
-        if val >= 10_000:
-            amount = int(val)
-    return company_id, amount
+    # Same parser as the backend, so "€1M" or "1,5 milioni" read the same everywhere.
+    return company_id, parse_amount(text)
 
 
 def authenticate_api(

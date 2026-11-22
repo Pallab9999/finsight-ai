@@ -49,6 +49,7 @@ from app.api_client import (
     DEFAULT_BACKEND_URL
 )
 from app.pdf_generator import generate_credit_memorandum_pdf
+from app import labels
 from backend.speech import mime_for, stt_available, transcribe
 from backend.llm import bedrock_available, bedrock_api_key_format_ok
 from backend.config import export_dotenv_secrets
@@ -980,12 +981,12 @@ if not st.session_state.get("authenticated", False):
                     <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.2rem;">
                         <span style="font-size: 1.15rem;">🔒</span>
                         <span style="font-size: 0.98rem; font-weight: 700; color: #ecfdf5;">
-                            Bank Acceptance Certainty: 94% Probability of Execution (Linked ID: ECOTEX-2026-IT)
+                            Deterministic, explainable scoring for every linked application
                         </span>
                     </div>
                     <div style="font-size: 0.78rem; color: #a7f3d0; line-height: 1.45;">
-                        Pre-audited against Banca d'Italia provincial NPL benchmarks and EBA loan origination rules.
-                        <b>Zero guessing. Zero black-box rejections.</b>
+                        Prototype rules over balance-sheet data and Banca d'Italia provincial NPL benchmarks.
+                        <b>Every number is traceable to its source.</b>
                     </div>
                 </div>
             </div>
@@ -1264,12 +1265,12 @@ with tab_dossier:
                 <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.2rem;">
                     <span style="font-size: 1.15rem;">🔒</span>
                     <span style="font-size: 0.98rem; font-weight: 700; color: #ecfdf5; letter-spacing: -0.01em;">
-                        Bank Acceptance Certainty: 94% Probability of Execution (Linked ID: {linked_app_id})
+                        {labels.verdict_banner(base_data.get('recommendation', 'REVIEW'), base_data.get('financial_score', 0))} at € {base_data['loan_amount']:,.0f} (Linked ID: {linked_app_id})
                     </span>
                 </div>
                 <div style="font-size: 0.78rem; color: #a7f3d0; line-height: 1.45;">
-                    Pre-audited against Banca d'Italia provincial NPL benchmarks and EBA loan origination rules.
-                    <b>Zero guessing. Zero black-box rejections.</b>
+                    Prototype rules over balance-sheet data and Banca d'Italia provincial NPL benchmarks.
+                    <b>Decision support only: the credit committee decides.</b>
                 </div>
             </div>
             <div style="text-align: right; font-family: 'JetBrains Mono', monospace;">
@@ -1316,7 +1317,7 @@ with tab_dossier:
         <div class="fin-stat-card">
             <div style="font-size: 0.68rem; color: #64748b; text-transform: uppercase; font-weight: 700;">Requested Facility</div>
             <div style="font-size: 1.15rem; font-weight: 800; color: #38bdf8; margin-top: 0.2rem;" class="fin-mono-value">€ {base_data['loan_amount']:,.0f}</div>
-            <div style="font-size: 0.7rem; color: #94a3b8; margin-top: 0.15rem;">Tasso {base_data.get('interest_rate', 5.15):.2f}% Prime SLL</div>
+            <div style="font-size: 0.7rem; color: #94a3b8; margin-top: 0.15rem;">Tasso {labels.format_rate(base_data.get('interest_rate', 0.0525))}</div>
         </div>
         <div class="fin-stat-card">
             <div style="font-size: 0.68rem; color: #64748b; text-transform: uppercase; font-weight: 700;">Valore della Produzione</div>
@@ -1444,9 +1445,10 @@ with tab_dossier:
     with k1:
         fin_score = payload.get("financial_score", base_data["financial_score"])
         st.plotly_chart(create_gauge(fin_score, "Financial Health Score", benchmark=70, color_theme="blue"), width="stretch")
-        st.markdown("""
+        fin_tier, fin_badge = labels.financial_tier_label(fin_score)
+        st.markdown(f"""
         <div style="text-align: center; margin-top: -15px;">
-            <span class="finsight-badge badge-primary">Prime Solvency Tier</span>
+            <span class="finsight-badge {fin_badge}">{fin_tier}</span>
             <span style="font-size: 0.72rem; color: #94a3b8;">Benchmark: 70/100</span>
         </div>
         """, unsafe_allow_html=True)
@@ -1454,10 +1456,11 @@ with tab_dossier:
     with k2:
         esg_score = payload.get("esg_score", base_data["esg_score"])
         st.plotly_chart(create_gauge(esg_score, "ESG Alignment Score", benchmark=75, color_theme="emerald"), width="stretch")
-        st.markdown("""
+        esg_tier, esg_badge = labels.esg_tier_label(esg_score)
+        st.markdown(f"""
         <div style="text-align: center; margin-top: -15px;">
-            <span class="finsight-badge badge-success">Top Decile Green</span>
-            <span style="font-size: 0.72rem; color: #94a3b8;">-45 bps Subsidized Spread</span>
+            <span class="finsight-badge {esg_badge}">{esg_tier}</span>
+            <span style="font-size: 0.72rem; color: #94a3b8;">Benchmark: 75/100</span>
         </div>
         """, unsafe_allow_html=True)
 
@@ -1483,6 +1486,7 @@ with tab_dossier:
     with k4:
         rec = payload.get("recommendation", "APPROVE")
         rec_color = "#34d399" if rec == "APPROVE" else ("#fbbf24" if rec == "REVIEW" else "#f87171")
+        out_text, out_badge, out_note = labels.outcome_label(rec)
         st.markdown(f"""
         <div class="exec-card" style="height: 215px; display: flex; flex-direction: column; justify-content: center; text-align: center; border-color: {rec_color}; box-shadow: 0 0 24px -6px {rec_color}33;">
             <div class="exec-card-title" style="justify-content: center;">Bankability Outcome</div>
@@ -1490,10 +1494,10 @@ with tab_dossier:
                 {rec}
             </div>
             <div style="margin-top: 0.35rem;">
-                <span class="finsight-badge badge-success">Pre-Approved at Prime Rates</span>
+                <span class="finsight-badge {out_badge}">{out_text}</span>
             </div>
             <p style="margin: 0.6rem 0 0 0; font-size: 0.72rem; color: #94a3b8; line-height: 1.4;">
-                Eligible for 5.15% fixed rate + 15% regional green grant
+                {out_note}
             </p>
         </div>
         """, unsafe_allow_html=True)
@@ -1503,24 +1507,28 @@ with tab_dossier:
     net_debt_ebitda_val = payload.get("net_debt_ebitda", base_data["net_debt_ebitda"])
     ebitda_m_val = payload.get("ebitda_margin", base_data["ebitda_margin"])
     quick_r_val = payload.get("quick_ratio", base_data["quick_ratio"])
+    dscr_txt, dscr_col = labels.dscr_label(dscr_val)
+    lev_txt, lev_col = labels.leverage_label(net_debt_ebitda_val)
+    mgn_txt, mgn_col = labels.margin_label(ebitda_m_val)
+    qr_txt, qr_col = labels.quick_ratio_label(quick_r_val)
 
     st.markdown(f"""
     <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 0.85rem; margin-bottom: 0.85rem;">
         <div class="fin-stat-card">
             <span style="font-size: 0.68rem; color: #94a3b8; text-transform: uppercase; font-weight: 700;">Debt Service Coverage (DSCR)</span>
-            <div style="font-size: 1.3rem; font-weight: 800; color: #38bdf8; margin-top: 0.2rem;" class="fin-mono-value">{dscr_val:.2f}x <span style="font-size: 0.72rem; color: #10b981; font-weight: 600;">(&gt; 1.30x Covenant)</span></div>
+            <div style="font-size: 1.3rem; font-weight: 800; color: #38bdf8; margin-top: 0.2rem;" class="fin-mono-value">{dscr_val:.2f}x <span style="font-size: 0.72rem; color: {dscr_col}; font-weight: 600;">({dscr_txt})</span></div>
         </div>
         <div class="fin-stat-card">
             <span style="font-size: 0.68rem; color: #94a3b8; text-transform: uppercase; font-weight: 700;">Net Debt / EBITDA</span>
-            <div style="font-size: 1.3rem; font-weight: 800; color: #38bdf8; margin-top: 0.2rem;" class="fin-mono-value">{net_debt_ebitda_val:.2f}x <span style="font-size: 0.72rem; color: #10b981; font-weight: 600;">(Low Default Risk)</span></div>
+            <div style="font-size: 1.3rem; font-weight: 800; color: #38bdf8; margin-top: 0.2rem;" class="fin-mono-value">{net_debt_ebitda_val:.2f}x <span style="font-size: 0.72rem; color: {lev_col}; font-weight: 600;">({lev_txt})</span></div>
         </div>
         <div class="fin-stat-card">
             <span style="font-size: 0.68rem; color: #94a3b8; text-transform: uppercase; font-weight: 700;">EBITDA Margin</span>
-            <div style="font-size: 1.3rem; font-weight: 800; color: #38bdf8; margin-top: 0.2rem;" class="fin-mono-value">{ebitda_m_val:.1f}% <span style="font-size: 0.72rem; color: #10b981; font-weight: 600;">(Top Quartile)</span></div>
+            <div style="font-size: 1.3rem; font-weight: 800; color: #38bdf8; margin-top: 0.2rem;" class="fin-mono-value">{ebitda_m_val:.1f}% <span style="font-size: 0.72rem; color: {mgn_col}; font-weight: 600;">({mgn_txt})</span></div>
         </div>
         <div class="fin-stat-card">
             <span style="font-size: 0.68rem; color: #94a3b8; text-transform: uppercase; font-weight: 700;">Quick Liquidity Ratio</span>
-            <div style="font-size: 1.3rem; font-weight: 800; color: #38bdf8; margin-top: 0.2rem;" class="fin-mono-value">{quick_r_val:.2f}x <span style="font-size: 0.72rem; color: #10b981; font-weight: 600;">(Ample Cash Cushion)</span></div>
+            <div style="font-size: 1.3rem; font-weight: 800; color: #38bdf8; margin-top: 0.2rem;" class="fin-mono-value">{quick_r_val:.2f}x <span style="font-size: 0.72rem; color: {qr_col}; font-weight: 600;">({qr_txt})</span></div>
         </div>
     </div>
     """, unsafe_allow_html=True)
@@ -1530,7 +1538,7 @@ with tab_dossier:
 
     # 7-Step Visual Decision Trace
     st.markdown("### Visual AI Decision Trace (Deterministic Execution)")
-    st.markdown("""
+    st.markdown(f"""
     <div class="trace-step-container">
         <div class="trace-step">
             <div class="trace-step-num">Step 01</div>
@@ -1564,8 +1572,8 @@ with tab_dossier:
         </div>
         <div class="trace-step trace-step-active">
             <div class="trace-step-num" style="color: #34d399;">Step 07</div>
-            <div class="trace-step-title" style="color: #ecfdf5; font-weight: 700;">Pre-Underwritten</div>
-            <div class="trace-step-status" style="color: #34d399;">✓ 94% Certainty</div>
+            <div class="trace-step-title" style="color: #ecfdf5; font-weight: 700;">Outcome</div>
+            <div class="trace-step-status" style="color: {rec_color};">✓ {rec}</div>
         </div>
     </div>
     """, unsafe_allow_html=True)
@@ -1579,7 +1587,7 @@ with tab_dossier:
         st.markdown("### Core Drivers of Bankability")
         st.markdown("""
         <div class="exec-card" style="min-height: 290px;">
-            <div class="exec-card-title">Institutional Approval Factors</div>
+            <div class="exec-card-title">Decision Factors</div>
         """, unsafe_allow_html=True)
         for d in payload.get("drivers", base_data.get("drivers", [])):
             st.markdown(f"• **{d}**")
